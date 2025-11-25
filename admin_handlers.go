@@ -1,0 +1,264 @@
+package main
+
+import (
+	"context"
+	"log" // (เพิ่ม)
+	"net/http"
+	"strconv"
+	"time"
+
+	"cloud.google.com/go/storage"
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/bcrypt" // (เพิ่ม)
+)
+
+// --- (getPendingUsersHandler - เหมือนเดิม) ---
+func getPendingUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		pendingUsers := make([]User, 0)
+
+		sqlStatement := `
+			SELECT 
+				u.user_id, u.username, u.email, u.gender_id, u.registration_date, 
+				u.first_name, u.last_name,
+				u.verification_status, u.tier_id, u.provider_level_id, u.phone_number, u.is_admin,
+				u.google_profile_picture, p.profile_image_url, p.age
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.verification_status = 'pending'
+			ORDER BY u.registration_date ASC
+		`
+		rows, err := dbPool.Query(ctx, sqlStatement)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query failed", "details": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var u User
+			if err := rows.Scan(
+				&u.UserID, &u.Username, &u.Email, &u.GenderID, &u.RegistrationDate,
+				&u.FirstName, &u.LastName, &u.VerificationStatus, &u.TierID, &u.ProviderLevelID,
+				&u.PhoneNumber, &u.IsAdmin, &u.GoogleProfilePicture, &u.ProfileImageUrl, &u.Age,
+			); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to scan user row", "details": err.Error()})
+				return
+			}
+			pendingUsers = append(pendingUsers, u)
+		}
+
+		c.JSON(http.StatusOK, pendingUsers)
+	}
+}
+
+// --- (getKycDetailsHandler - เหมือนเดิม) ---
+func getKycDetailsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, err := strconv.Atoi(c.Param("userId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		var kyc UserVerification
+		err = dbPool.QueryRow(ctx,
+			"SELECT verification_id, user_id, national_id_url, health_cert_url, face_scan_url, submitted_at FROM user_verifications WHERE user_id = $1",
+			userID,
+		).Scan(&kyc.VerificationID, &kyc.UserID, &kyc.NationalIDUrl, &kyc.HealthCertUrl, &kyc.FaceScanUrl, &kyc.SubmittedAt)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "No KYC data found for this user"})
+			return
+		}
+
+		c.JSON(http.StatusOK, kyc)
+	}
+}
+
+// --- (getKycFileUrlHandler - เหมือนเดิม) ---
+func getKycFileUrlHandler(storageClient *storage.Client, gcsBucketName string, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		fileKey := c.Query("key")
+		if fileKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "File key is required"})
+			return
+		}
+
+		expires := time.Now().Add(10 * time.Minute)
+		opts := &storage.SignedURLOptions{
+			Scheme:  storage.SigningSchemeV4,
+			Method:  "GET",
+			Expires: expires,
+		}
+
+		url, err := storage.SignedURL(gcsBucketName, fileKey, opts)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create signed URL", "details": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"url": url})
+	}
+}
+
+// --- (approveUserHandler - เหมือนเดิม) ---
+func approveUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, err := strconv.Atoi(c.Param("userId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		_, err = dbPool.Exec(ctx, "UPDATE users SET verification_status = 'verified' WHERE user_id = $1", userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to approve user", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "User approved successfully"})
+	}
+}
+
+// --- (rejectUserHandler - เหมือนเดิม) ---
+func rejectUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, err := strconv.Atoi(c.Param("userId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		_, err = dbPool.Exec(ctx, "UPDATE users SET verification_status = 'rejected' WHERE user_id = $1", userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reject user", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "User rejected successfully"})
+	}
+}
+
+// --- (adminUpdateUserRolesHandler - เหมือนเดิม) ---
+func adminUpdateUserRolesHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, err := strconv.Atoi(c.Param("userId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		var updates struct {
+			TierID          *int `json:"tier_id"`
+			ProviderLevelID *int `json:"provider_level_id"`
+		}
+
+		if err := c.ShouldBindJSON(&updates); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		if updates.TierID != nil {
+			_, err = dbPool.Exec(ctx, "UPDATE users SET tier_id = $1 WHERE user_id = $2", *updates.TierID, userID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update subscription tier"})
+				return
+			}
+		}
+
+		if updates.ProviderLevelID != nil {
+			_, err = dbPool.Exec(ctx, "UPDATE users SET provider_level_id = $1 WHERE user_id = $2", *updates.ProviderLevelID, userID)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update provider level"})
+				return
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "User roles updated successfully"})
+	}
+}
+
+// --- (adminCreateUserHandler - เหมือนเดิม) ---
+func adminCreateUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+
+		var newUser struct {
+			Username           string `json:"username" binding:"required"`
+			Email              string `json:"email" binding:"required"`
+			Password           string `json:"password" binding:"required"`
+			GenderID           int    `json:"gender_id"`
+			TierID             int    `json:"tier_id"`
+			ProviderLevelID    int    `json:"provider_level_id"`
+			VerificationStatus string `json:"verification_status"`
+			IsAdmin            bool   `json:"is_admin"`
+		}
+
+		if err := c.ShouldBindJSON(&newUser); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		hashedPasswordBytes, err := bcrypt.GenerateFromPassword([]byte(newUser.Password), 10)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
+			return
+		}
+		hashedPassword := string(hashedPasswordBytes)
+
+		if newUser.GenderID == 0 {
+			newUser.GenderID = 4
+		}
+		if newUser.TierID == 0 {
+			newUser.TierID = 1
+		}
+		if newUser.ProviderLevelID == 0 {
+			newUser.ProviderLevelID = 1
+		}
+		if newUser.VerificationStatus == "" {
+			newUser.VerificationStatus = "unverified"
+		}
+
+		var createdUser User
+		sqlStatement := `
+			INSERT INTO users (
+				username, email, password_hash, gender_id, 
+				tier_id, provider_level_id, verification_status, is_admin
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			RETURNING 
+				user_id, username, email, gender_id, registration_date, 
+				first_name, last_name, tier_id, provider_level_id, 
+				verification_status, is_admin, phone_number, google_profile_picture
+		`
+		err = dbPool.QueryRow(ctx, sqlStatement,
+			newUser.Username,
+			newUser.Email,
+			hashedPassword,
+			newUser.GenderID,
+			newUser.TierID,
+			newUser.ProviderLevelID,
+			newUser.VerificationStatus,
+			newUser.IsAdmin,
+		).Scan(
+			&createdUser.UserID, &createdUser.Username, &createdUser.Email,
+			&createdUser.GenderID, &createdUser.RegistrationDate,
+			&createdUser.FirstName, &createdUser.LastName,
+			&createdUser.TierID, &createdUser.ProviderLevelID,
+			&createdUser.VerificationStatus, &createdUser.IsAdmin,
+			&createdUser.PhoneNumber, &createdUser.GoogleProfilePicture,
+		)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user", "details": err.Error()})
+			return
+		}
+
+		_, err = dbPool.Exec(ctx, "INSERT INTO user_profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING", createdUser.UserID)
+		if err != nil {
+			log.Printf("Warning: Could not create empty profile for new user %d: %v\n", createdUser.UserID, err)
+		}
+
+		c.JSON(http.StatusCreated, createdUser)
+	}
+}

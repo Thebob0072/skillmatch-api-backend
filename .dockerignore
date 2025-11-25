@@ -1,0 +1,56 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+skillmatch-api
+skillmatch-*
+
+# Go workspace
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+server.log
+
+# Database
+*.db
+*.sqlite
+
+# Keys and secrets
+key/*.json
+*.pem
+*.key
+*.crt
+
+# Temporary files
+tmp/
+temp/
+
+# Backups
+backups/
+*.backup
+
+# Node modules (if any)
+node_modules/
+
+# Documentation build
+docs/.cache/

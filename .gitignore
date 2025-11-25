@@ -1,0 +1,45 @@
+# Environment Variables
+.env
+.env.local
+.env.production
+
+# Secrets
+*.pem
+*.key
+key/*.json
+jwt_secret.txt
+
+# Build outputs
+skillmatch-api
+skillmatch-api-*
+*.exe
+*.test
+*.out
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+
+# Backup files
+*.backup
+*-FIXED
+*-NUCLEAR
+backup.sh
+
+# Docker volumes
+postgres_data/
+redis_data/
