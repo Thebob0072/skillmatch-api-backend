@@ -49,14 +49,19 @@ func main() {
 	}
 	fmt.Println("✅ เชื่อมต่อ Redis สำเร็จ!")
 
-	// --- 3. Connect to Google Cloud Storage ---
+	// --- 3. Connect to Google Cloud Storage (Optional for Development) ---
 	// (ต้องตั้งค่า ENV VAR: GOOGLE_APPLICATION_CREDENTIALS)
-	storageClient, err := storage.NewClient(ctx)
+	var storageClient *storage.Client
+	storageClient, err = storage.NewClient(ctx)
 	if err != nil {
-		log.Fatalf("Failed to create Google Storage client: %v\n(!!! เช็ค GOOGLE_APPLICATION_CREDENTIALS !!!)", err)
+		log.Printf("⚠️  Failed to create Google Storage client: %v\n", err)
+		log.Println("⚠️  Running in DEVELOPMENT MODE without GCS (file uploads will fail)")
+		log.Println("⚠️  To enable GCS, set GOOGLE_APPLICATION_CREDENTIALS environment variable")
+		storageClient = nil // Set to nil to indicate GCS is unavailable
+	} else {
+		defer storageClient.Close()
+		fmt.Println("✅ เชื่อมต่อ Google Cloud Storage สำเร็จ!")
 	}
-	defer storageClient.Close()
-	fmt.Println("✅ เชื่อมต่อ Google Cloud Storage สำเร็จ!")
 
 	// --- 4. Initialize Global Database Connection ---
 	// (for message, notification, report handlers)
@@ -123,6 +128,7 @@ func main() {
 	{
 		// User Routes
 		protected.GET("/users/me", getMeHandler(dbPool, ctx))    // (from user_handlers.go)
+		protected.GET("/profile", getMeHandler(dbPool, ctx))     // Alias for /users/me (Frontend compatibility)
 		protected.GET("/users/:id", getUserHandler(dbPool, ctx)) // (from user_handlers.go)
 
 		// Browse Routes
@@ -248,8 +254,8 @@ func main() {
 		admin.GET("/users", listAllUsersHandler(dbPool, ctx))             // List all users
 		admin.GET("/admins", listAdminsHandler(dbPool, ctx))              // List all admins (GOD only)
 		admin.POST("/admins", createAdminHandler(dbPool, ctx))            // Create admin (GOD only)
-		admin.DELETE("/admins/:user_id", deleteAdminHandler(dbPool, ctx))   // Delete admin (GOD only)
-		admin.DELETE("/users/:user_id", deleteUserHandler(dbPool, ctx))     // Delete any user (GOD only)
+		admin.DELETE("/admins/:user_id", deleteAdminHandler(dbPool, ctx)) // Delete admin (GOD only)
+		admin.DELETE("/users/:user_id", deleteUserHandler(dbPool, ctx))   // Delete any user (GOD only)
 
 		// 🆕 Financial System Routes - Admin
 		admin.GET("/withdrawals", adminGetPendingWithdrawalsHandler(dbPool, ctx))                        // ดูคำขอถอนเงินทั้งหมด
@@ -274,8 +280,8 @@ func main() {
 		admin.GET("/provider/:userId/tier-details", adminGetProviderTierDetailsHandler(dbPool, ctx)) // ดูรายละเอียด Tier (from provider_tier_handlers.go)
 
 		// 🆕 Admin Face Verification Management (from face_verification_handlers.go)
-		admin.GET("/face-verifications", adminListFaceVerificationsHandler(dbPool, ctx))                          // ดู face verifications ทั้งหมด
-		admin.PATCH("/face-verification/:verificationId", adminReviewFaceVerificationHandler(dbPool, ctx))        // อนุมัติ/ปฏิเสธ face verification
+		admin.GET("/face-verifications", adminListFaceVerificationsHandler(dbPool, ctx))                           // ดู face verifications ทั้งหมด
+		admin.PATCH("/face-verification/:verificationId", adminReviewFaceVerificationHandler(dbPool, ctx))         // อนุมัติ/ปฏิเสธ face verification
 		admin.POST("/face-verification/:verificationId/trigger-matching", triggerFaceMatchingHandler(dbPool, ctx)) // เรียก Face Matching API
 
 		// 🆕 Admin Schedule Viewing (from schedule_handlers.go)
@@ -292,13 +298,16 @@ func main() {
 		god.GET("/view-mode", getGodViewModeHandler(dbPool, ctx))  // Get current view mode
 
 		// User Management (modifies actual user data in DB)
-		god.POST("/update-user", updateUserHandler(dbPool, ctx))    // Update any user's role/tier
+		god.POST("/update-user", updateUserHandler(dbPool, ctx))      // Update any user's role/tier
 		god.DELETE("/users/:user_id", deleteUserHandler(dbPool, ctx)) // Delete any user (except GOD)
 	}
 
 	// 🆕 Service Category Public Routes
 	router.GET("/service-categories", listServiceCategoriesHandler(dbPool, ctx))                    // ดูหมวดหมู่ทั้งหมด (Public)
 	router.GET("/categories/:category_id/providers", browseProvidersByCategoryHandler(dbPool, ctx)) // ดูผู้ให้บริการในหมวดหมู่
+
+	// 🆕 Browse Search with Filters (Public)
+	router.GET("/browse/search", browseSearchHandler(dbPool, ctx)) // ⬅️ NEW: Advanced search with all filters
 
 	// 🆕 Provider Public Profile Routes (No auth required - anyone can view)
 	// Public routes - ข้อมูลจำกัด (ไม่แสดง Age, Height, Weight, ServiceType, etc.)

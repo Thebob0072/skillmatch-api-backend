@@ -35,7 +35,8 @@ type User struct {
 	LastName           *string   `json:"last_name"`
 
 	// (ข้อมูลจาก JOIN)
-	GoogleProfilePicture *string  `json:"google_profile_picture"` // รูปจาก Google
+	GoogleProfilePicture *string  `json:"google_profile_picture"` // รูปจาก Google (legacy)
+	ProfilePictureURL    *string  `json:"profile_picture_url"`    // ⬅️ NEW: รูปโปรไฟล์ (Google/uploaded)
 	Bio                  *string  `json:"bio"`
 	Location             *string  `json:"location"`
 	Skills               []string `json:"skills"`

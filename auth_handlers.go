@@ -175,7 +175,12 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 		// 1. Exchange auth code for a token
 		token, err := googleOauthConfig.Exchange(ctx, requestBody.Code)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to exchange Google token", "details": err.Error()})
+			log.Printf("Google OAuth Exchange Error: %v", err)
+			// Send 401 so frontend knows to redirect back to home
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "Google authentication failed. Please try again.",
+				"details": err.Error(),
+			})
 			return
 		}
 
@@ -183,19 +188,27 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 		client := googleOauthConfig.Client(ctx, token)
 		oauth2Service, err := google_oauth.NewService(ctx, option.WithHTTPClient(client))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create Google service", "details": err.Error()})
+			log.Printf("Google Service Creation Error: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "Failed to connect to Google. Please try again.",
+				"details": err.Error(),
+			})
 			return
 		}
 		userInfo, err := oauth2Service.Userinfo.Get().Do()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get user info", "details": err.Error()})
+			log.Printf("Google UserInfo Error: %v", err)
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":   "Failed to retrieve user information from Google.",
+				"details": err.Error(),
+			})
 			return
 		}
 
 		// 3. Find or Create User in our DB
 		var userID int
 		var userEmail string = userInfo.Email
-		var googleProfilePicture string = userInfo.Picture
+		var profilePictureURL string = userInfo.Picture // ⬅️ Google profile picture URL
 
 		// Check if user exists by email
 		err = dbPool.QueryRow(ctx, "SELECT user_id FROM users WHERE email = $1", userEmail).Scan(&userID)
@@ -204,8 +217,8 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 			fmt.Println("User not found, creating new user...")
 
 			sqlStatement := `
-				INSERT INTO users (username, email, gender_id, first_name, last_name, google_id, google_profile_picture)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
+				INSERT INTO users (username, email, gender_id, first_name, last_name, google_id, google_profile_picture, profile_picture_url)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				RETURNING user_id
 			`
 			err = dbPool.QueryRow(ctx, sqlStatement,
@@ -215,7 +228,8 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 				userInfo.GivenName,
 				userInfo.FamilyName,
 				userInfo.Id,
-				googleProfilePicture, // (Save Google profile pic)
+				profilePictureURL, // (Save to old column for compatibility)
+				profilePictureURL, // ⬅️ Save to NEW profile_picture_url column
 			).Scan(&userID)
 
 			if err != nil {
@@ -231,12 +245,14 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 				`UPDATE users SET 
 					google_id = $1, 
 					google_profile_picture = $2,
-					first_name = COALESCE($3, first_name),
-					last_name = COALESCE($4, last_name),
-					username = COALESCE($5, username)
-				WHERE user_id = $6`,
-				userInfo.Id, 
-				googleProfilePicture,
+					profile_picture_url = $3,
+					first_name = COALESCE($4, first_name),
+					last_name = COALESCE($5, last_name),
+					username = COALESCE($6, username)
+				WHERE user_id = $7`,
+				userInfo.Id,
+				profilePictureURL,   // Keep old column
+				profilePictureURL,   // ⬅️ Update NEW profile_picture_url
 				userInfo.GivenName,  // first_name
 				userInfo.FamilyName, // last_name
 				userInfo.Name,       // username (use Google name if username is empty)
@@ -253,9 +269,62 @@ func handleGoogleCallback(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 			return
 		}
 
+		// 5. Fetch complete user data with tier name to send to frontend
+		var userData struct {
+			UserID             int     `json:"user_id"`
+			Username           string  `json:"username"`
+			Email              string  `json:"email"`
+			FirstName          *string `json:"first_name"`
+			LastName           *string `json:"last_name"`
+			TierID             int     `json:"tier_id"`
+			TierName           string  `json:"tier_name"`
+			IsAdmin            bool    `json:"is_admin"`
+			ProfilePictureURL  *string `json:"profile_picture_url"` // ⬅️ Changed from google_profile_picture
+			VerificationStatus string  `json:"verification_status"`
+		}
+
+		err = dbPool.QueryRow(ctx, `
+			SELECT 
+				u.user_id, 
+				u.username, 
+				u.email, 
+				u.first_name, 
+				u.last_name, 
+				u.tier_id, 
+				COALESCE(t.name, 'General') as tier_name,
+				u.is_admin, 
+				u.profile_picture_url,
+				u.verification_status
+			FROM users u
+			LEFT JOIN tiers t ON u.tier_id = t.tier_id
+			WHERE u.user_id = $1
+		`, userID).Scan(
+			&userData.UserID,
+			&userData.Username,
+			&userData.Email,
+			&userData.FirstName,
+			&userData.LastName,
+			&userData.TierID,
+			&userData.TierName,
+			&userData.IsAdmin,
+			&userData.ProfilePictureURL, // ⬅️ Now using profile_picture_url
+			&userData.VerificationStatus,
+		)
+
+		if err != nil {
+			log.Printf("Warning: Failed to fetch user data after Google login: %v\n", err)
+			// Still send token, but without user data
+			c.JSON(http.StatusOK, gin.H{
+				"message": "Login successful",
+				"token":   tokenString,
+			})
+			return
+		}
+
 		c.JSON(http.StatusOK, gin.H{
 			"message": "Login successful",
 			"token":   tokenString,
+			"user":    userData,
 		})
 	}
 }

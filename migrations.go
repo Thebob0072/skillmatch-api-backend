@@ -657,5 +657,271 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 		}
 	}
 
+	// --- Migration 023: Service Categories ---
+	fmt.Println("🔄 Running Migration 023: Service Categories...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS service_categories (
+			category_id SERIAL PRIMARY KEY,
+			name VARCHAR(100) NOT NULL UNIQUE,
+			name_thai VARCHAR(100),
+			icon VARCHAR(50),
+			description TEXT,
+			is_adult BOOLEAN DEFAULT false,
+			display_order INT DEFAULT 0,
+			is_active BOOLEAN DEFAULT true,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		INSERT INTO service_categories (name, name_thai, icon, description, display_order) VALUES
+		('Massage', 'นวด', '💆', 'Professional massage services', 1),
+		('Spa', 'สปา', '🧖', 'Spa and wellness treatments', 2),
+		('Beauty', 'ความงาม', '💄', 'Beauty and cosmetic services', 3),
+		('Wellness', 'สุขภาพ', '🧘', 'Health and wellness services', 4),
+		('Therapy', 'บำบัด', '🩺', 'Therapeutic services', 5)
+		ON CONFLICT (name) DO NOTHING;
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 023 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 023: Service Categories completed!")
+	}
+
+	// --- Migration 024: Provider Categories Junction ---
+	fmt.Println("🔄 Running Migration 024: Provider Categories...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS provider_categories (
+			provider_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			category_id INT NOT NULL REFERENCES service_categories(category_id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			PRIMARY KEY (provider_id, category_id)
+		);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 024 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 024: Provider Categories completed!")
+	}
+
+	// --- Migration 025: Conversations & Messages ---
+	fmt.Println("🔄 Running Migration 025: Messaging System...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS conversations (
+			conversation_id SERIAL PRIMARY KEY,
+			user1_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			user2_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW(),
+			CONSTRAINT user_order CHECK (user1_id < user2_id),
+			UNIQUE (user1_id, user2_id)
+		);
+
+		CREATE TABLE IF NOT EXISTS messages (
+			message_id SERIAL PRIMARY KEY,
+			conversation_id INT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+			sender_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			content TEXT NOT NULL,
+			is_read BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
+		CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender_id);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 025 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 025: Messaging System completed!")
+	}
+
+	// --- Migration 026: Notifications ---
+	fmt.Println("🔄 Running Migration 026: Notifications...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS notifications (
+			notification_id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			type VARCHAR(50) NOT NULL,
+			title VARCHAR(255) NOT NULL,
+			message TEXT NOT NULL,
+			is_read BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id);
+		CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id, is_read);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 026 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 026: Notifications completed!")
+	}
+
+	// --- Migration 027: Blocks System ---
+	fmt.Println("🔄 Running Migration 027: Blocks System...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS blocks (
+			block_id SERIAL PRIMARY KEY,
+			blocker_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			blocked_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			UNIQUE (blocker_id, blocked_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_blocks_blocker ON blocks(blocker_id);
+		CREATE INDEX IF NOT EXISTS idx_blocks_blocked ON blocks(blocked_id);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 027 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 027: Blocks System completed!")
+	}
+
+	// --- Migration 028: Reports System ---
+	fmt.Println("🔄 Running Migration 028: Reports System...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS reports (
+			report_id SERIAL PRIMARY KEY,
+			reporter_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			reported_user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			reason VARCHAR(255) NOT NULL,
+			description TEXT,
+			status VARCHAR(50) DEFAULT 'pending',
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			resolved_at TIMESTAMPTZ,
+			admin_notes TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 028 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 028: Reports System completed!")
+	}
+
+	// --- Migration 029: Financial System ---
+	fmt.Println("🔄 Running Migration 029: Financial System...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS wallets (
+			wallet_id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE UNIQUE,
+			available_balance DECIMAL(10, 2) DEFAULT 0.00,
+			pending_balance DECIMAL(10, 2) DEFAULT 0.00,
+			total_earned DECIMAL(10, 2) DEFAULT 0.00,
+			total_withdrawn DECIMAL(10, 2) DEFAULT 0.00,
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS transactions (
+			transaction_id SERIAL PRIMARY KEY,
+			wallet_id INT NOT NULL REFERENCES wallets(wallet_id) ON DELETE CASCADE,
+			booking_id INT REFERENCES bookings(booking_id),
+			type VARCHAR(50) NOT NULL,
+			amount DECIMAL(10, 2) NOT NULL,
+			status VARCHAR(50) DEFAULT 'pending',
+			stripe_transaction_id VARCHAR(255),
+			platform_fee DECIMAL(10, 2) DEFAULT 0.00,
+			stripe_fee DECIMAL(10, 2) DEFAULT 0.00,
+			net_amount DECIMAL(10, 2) NOT NULL,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS bank_accounts (
+			bank_account_id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			bank_name VARCHAR(100) NOT NULL,
+			account_number VARCHAR(50) NOT NULL,
+			account_holder_name VARCHAR(255) NOT NULL,
+			is_default BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);
+
+		CREATE TABLE IF NOT EXISTS withdrawal_requests (
+			withdrawal_id SERIAL PRIMARY KEY,
+			wallet_id INT NOT NULL REFERENCES wallets(wallet_id) ON DELETE CASCADE,
+			bank_account_id INT NOT NULL REFERENCES bank_accounts(bank_account_id),
+			amount DECIMAL(10, 2) NOT NULL,
+			status VARCHAR(50) DEFAULT 'pending',
+			requested_at TIMESTAMPTZ DEFAULT NOW(),
+			approved_at TIMESTAMPTZ,
+			rejected_at TIMESTAMPTZ,
+			completed_at TIMESTAMPTZ,
+			admin_notes TEXT,
+			transfer_slip_url TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_transactions_wallet ON transactions(wallet_id);
+		CREATE INDEX IF NOT EXISTS idx_withdrawal_status ON withdrawal_requests(status);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 029 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 029: Financial System completed!")
+	}
+
+	// --- Migration 030: Provider Documents ---
+	fmt.Println("🔄 Running Migration 030: Provider Documents...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS provider_documents (
+			document_id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			document_type VARCHAR(50) NOT NULL,
+			document_url TEXT NOT NULL,
+			verification_status VARCHAR(50) DEFAULT 'pending',
+			uploaded_at TIMESTAMPTZ DEFAULT NOW(),
+			verified_at TIMESTAMPTZ,
+			admin_notes TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_provider_docs_user ON provider_documents(user_id);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 030 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 030: Provider Documents completed!")
+	}
+
+	// --- Migration 031: Provider Tier History ---
+	fmt.Println("🔄 Running Migration 031: Provider Tier History...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS provider_tier_history (
+			history_id SERIAL PRIMARY KEY,
+			provider_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			old_tier_id INT REFERENCES tiers(tier_id),
+			new_tier_id INT NOT NULL REFERENCES tiers(tier_id),
+			changed_at TIMESTAMPTZ DEFAULT NOW(),
+			reason TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_tier_history_provider ON provider_tier_history(provider_id);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 031 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 031: Provider Tier History completed!")
+	}
+
+	// --- Migration 032: Fix Service Categories Schema ---
+	fmt.Println("🔄 Running Migration 032: Fix Service Categories Schema...")
+	_, err = dbPool.Exec(ctx, `
+		-- Add missing columns to service_categories
+		ALTER TABLE service_categories 
+			ADD COLUMN IF NOT EXISTS name_thai VARCHAR(100),
+			ADD COLUMN IF NOT EXISTS is_adult BOOLEAN DEFAULT false,
+			ADD COLUMN IF NOT EXISTS display_order INT DEFAULT 0,
+			ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+
+		-- Update existing records with Thai names and display order
+		UPDATE service_categories SET name_thai = 'นวด', display_order = 1 WHERE name = 'Massage';
+		UPDATE service_categories SET name_thai = 'สปา', display_order = 2 WHERE name = 'Spa';
+		UPDATE service_categories SET name_thai = 'ความงาม', display_order = 3 WHERE name = 'Beauty';
+		UPDATE service_categories SET name_thai = 'สุขภาพ', display_order = 4 WHERE name = 'Wellness';
+		UPDATE service_categories SET name_thai = 'บำบัด', display_order = 5 WHERE name = 'Therapy';
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 032 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 032: Fix Service Categories Schema completed!")
+	}
+
 	fmt.Println("✅ All Database Migrations สำเร็จ!")
 }

@@ -1,13 +1,13 @@
 package main
 
 import (
-"context"
-"net/http"
-"strconv"
+	"context"
+	"net/http"
+	"strconv"
 
-"github.com/gin-gonic/gin"
-"github.com/jackc/pgx/v5/pgxpool"
-"github.com/lib/pq" // (จำเป็นสำหรับ .Scan() array)
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/lib/pq" // (จำเป็นสำหรับ .Scan() array)
 )
 
 // --- Handler: GET /users/:id (Used by getMeHandler) ---
@@ -25,17 +25,19 @@ func getUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
 
 		var foundUser User // (ใช้ User struct จาก models.go)
 
-		// SQL นี้จะ JOIN ตาราง users และ user_profiles
+		// SQL นี้จะ JOIN ตาราง users, user_profiles และ tiers
 		sqlStatement := `
 			SELECT 
 				u.user_id, u.username, u.email, u.gender_id, u.registration_date, 
 				u.first_name, u.last_name,
 				u.verification_status, 
 				u.tier_id,           -- (Subscription Tier)
+				t.name,              -- (Tier Name)
 				u.provider_level_id, -- (Provider Level)
 				u.is_admin, 
 				u.phone_number, 
 				u.google_profile_picture,
+				u.profile_picture_url,  -- ⬅️ NEW: Profile picture from Google/uploads
 				p.bio,
 				p.location,
 				p.skills,
@@ -43,25 +45,34 @@ func getUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
 				
 			FROM users u
 			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			LEFT JOIN tiers t ON u.tier_id = t.tier_id
 			WHERE u.user_id = $1
 		`
 
-		// .Scan() ต้องตรงกับลำดับของ SELECT (17 fields)
+		// .Scan() ต้องตรงกับลำดับของ SELECT (19 fields now)
+		var tierName *string
 		err = dbPool.QueryRow(ctx, sqlStatement, userID).Scan(
-&foundUser.UserID, &foundUser.Username, &foundUser.Email,
+			&foundUser.UserID, &foundUser.Username, &foundUser.Email,
 			&foundUser.GenderID, &foundUser.RegistrationDate,
 			&foundUser.FirstName, &foundUser.LastName,
 			&foundUser.VerificationStatus,
 			&foundUser.TierID,
+			&tierName, // Tier Name
 			&foundUser.ProviderLevelID,
 			&foundUser.IsAdmin,
 			&foundUser.PhoneNumber,
 			&foundUser.GoogleProfilePicture,
+			&foundUser.ProfilePictureURL,         // ⬅️ NEW: Scan profile_picture_url
 			&foundUser.Bio,                       // (from user_profiles)
 			&foundUser.Location,                  // (from user_profiles)
 			(*pq.StringArray)(&foundUser.Skills), // (from user_profiles)
 			&foundUser.ProfileImageUrl,           // (from user_profiles)
 		)
+
+		// Set tier_name if available
+		if tierName != nil {
+			foundUser.TierName = *tierName
+		}
 
 		if err != nil {
 			// Log the full error for debugging
