@@ -123,6 +123,15 @@ func paymentWebhookHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handle
 					return
 				}
 				fmt.Println("✅ Booking payment webhook processed successfully")
+			} else if paymentType == "booking_extension" {
+				// --- Handle Booking Extension Payment ---
+				err := handleBookingExtension(dbPool, ctx, checkoutSession)
+				if err != nil {
+					fmt.Printf("❌ Error processing booking extension: %v\n", err)
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process booking extension", "details": err.Error()})
+					return
+				}
+				fmt.Println("✅ Booking extension webhook processed successfully")
 			} else {
 				// --- Handle Subscription Payment (Original Logic) ---
 				userID, err := strconv.Atoi(checkoutSession.ClientReferenceID)

@@ -112,12 +112,16 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 			national_id_url TEXT,
 			health_cert_url TEXT,
 			face_scan_url TEXT,
+			profile_photos JSONB,
 			submitted_at TIMESTAMPTZ
 		);
 	`)
 	if err != nil {
 		log.Fatalf("ไม่สามารถสร้างตาราง user_verifications: %v\n", err)
 	}
+
+	// Add profile_photos column if not exists (for existing tables)
+	_, _ = dbPool.Exec(ctx, `ALTER TABLE user_verifications ADD COLUMN IF NOT EXISTS profile_photos JSONB;`)
 
 	// --- 6. ตาราง User_Profiles (ข้อมูลที่ผู้ใช้กรอกเอง) ---
 	_, err = dbPool.Exec(ctx, `
@@ -672,12 +676,13 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);
 
-		INSERT INTO service_categories (name, name_thai, icon, description, display_order) VALUES
-		('Massage', 'นวด', '💆', 'Professional massage services', 1),
-		('Spa', 'สปา', '🧖', 'Spa and wellness treatments', 2),
-		('Beauty', 'ความงาม', '💄', 'Beauty and cosmetic services', 3),
-		('Wellness', 'สุขภาพ', '🧘', 'Health and wellness services', 4),
-		('Therapy', 'บำบัด', '🩺', 'Therapeutic services', 5)
+		INSERT INTO service_categories (name, name_thai, icon, description, is_adult, display_order) VALUES
+		('Escort', 'เด็กเอน', '💃', 'Escort and companion services', true, 1),
+		('Bar Attendant', 'เด็กชงเหล้า', '🍸', 'Bar service and entertainment', true, 2),
+		('Adult Services', 'บริการผู้ใหญ่', '💋', 'Adult entertainment services', true, 3),
+		('Spa & Bath', 'อาบน้ำ/สปา', '🛁', 'Spa and bathing services', true, 4),
+		('Dining Companion', 'ทานข้าว', '🍽️', 'Dining and meal companion services', true, 5),
+		('Movie Companion', 'ดูหนัง', '🎬', 'Movie and entertainment companion', true, 6)
 		ON CONFLICT (name) DO NOTHING;
 	`)
 	if err != nil {
@@ -910,17 +915,46 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 			ADD COLUMN IF NOT EXISTS display_order INT DEFAULT 0,
 			ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
 
-		-- Update existing records with Thai names and display order
-		UPDATE service_categories SET name_thai = 'นวด', display_order = 1 WHERE name = 'Massage';
-		UPDATE service_categories SET name_thai = 'สปา', display_order = 2 WHERE name = 'Spa';
-		UPDATE service_categories SET name_thai = 'ความงาม', display_order = 3 WHERE name = 'Beauty';
-		UPDATE service_categories SET name_thai = 'สุขภาพ', display_order = 4 WHERE name = 'Wellness';
-		UPDATE service_categories SET name_thai = 'บำบัด', display_order = 5 WHERE name = 'Therapy';
+		-- Update existing records with Thai names, display order, and adult flag
+		UPDATE service_categories SET name_thai = 'เด็กเอน', is_adult = true, display_order = 1 WHERE name = 'Escort';
+		UPDATE service_categories SET name_thai = 'เด็กชงเหล้า', is_adult = true, display_order = 2 WHERE name = 'Bar Attendant';
+		UPDATE service_categories SET name_thai = 'บริการผู้ใหญ่', is_adult = true, display_order = 3 WHERE name = 'Adult Services';
+		UPDATE service_categories SET name_thai = 'อาบน้ำ/สปา', is_adult = true, display_order = 4 WHERE name = 'Spa & Bath';
+		UPDATE service_categories SET name_thai = 'ทานข้าว', is_adult = true, display_order = 5 WHERE name = 'Dining Companion';
+		UPDATE service_categories SET name_thai = 'ดูหนัง', is_adult = true, display_order = 6 WHERE name = 'Movie Companion';
 	`)
 	if err != nil {
 		log.Printf("Warning: Migration 032 error: %v\n", err)
 	} else {
 		fmt.Println("✅ Migration 032: Fix Service Categories Schema completed!")
+	}
+
+	// --- Migration 033: Add profile_picture_url to users table ---
+	fmt.Println("🔄 Running Migration 033: Add profile_picture_url to users...")
+	_, err = dbPool.Exec(ctx, `
+		ALTER TABLE users 
+			ADD COLUMN IF NOT EXISTS profile_picture_url TEXT;
+		
+		CREATE INDEX IF NOT EXISTS idx_users_profile_picture ON users(profile_picture_url) WHERE profile_picture_url IS NOT NULL;
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 033 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 033: Add profile_picture_url completed!")
+	}
+
+	// --- Migration 034: Safety & Business Features ---
+	fmt.Println("🔄 Running Migration 034: Safety & Business Features...")
+	migration034SQL, err := os.ReadFile("docs/sql-migrations/034_safety_business_features.sql")
+	if err != nil {
+		log.Printf("⚠️  Could not read migration 034 file: %v\n", err)
+	} else {
+		_, err = dbPool.Exec(ctx, string(migration034SQL))
+		if err != nil {
+			log.Printf("Warning: Migration 034 error: %v\n", err)
+		} else {
+			fmt.Println("✅ Migration 034: Safety & Business Features completed!")
+		}
 	}
 
 	fmt.Println("✅ All Database Migrations สำเร็จ!")

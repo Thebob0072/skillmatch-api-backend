@@ -356,3 +356,138 @@ func updateBookingStatusHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.H
 		c.JSON(http.StatusOK, gin.H{"message": "Booking status updated"})
 	}
 }
+
+// --- GET /bookings/:id/work-details (รายละเอียด Booking สำหรับ Provider พร้อมที่อยู่ลูกค้า) ---
+func getBookingWorkDetailsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		bookingID, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid booking ID"})
+			return
+		}
+
+		userID, _ := c.Get("userID")
+
+		// Get booking details with client info
+		var result struct {
+			BookingID       int       `json:"booking_id"`
+			ProviderID      int       `json:"provider_id"`
+			ClientID        int       `json:"client_id"`
+			ClientUsername  string    `json:"client_username"`
+			ClientPhone     *string   `json:"client_phone"`
+			PackageName     string    `json:"package_name"`
+			Duration        int       `json:"duration"`
+			TotalPrice      float64   `json:"total_price"`
+			Status          string    `json:"status"`
+			Location        *string   `json:"location"`
+			LocationAddress *string   `json:"location_address"`
+			Latitude        *float64  `json:"latitude"`
+			Longitude       *float64  `json:"longitude"`
+			SpecialNotes    *string   `json:"special_notes"`
+			StartTime       time.Time `json:"start_time"`
+			EndTime         time.Time `json:"end_time"`
+			CheckInStatus   *string   `json:"check_in_status"`
+			CheckInID       *int      `json:"check_in_id"`
+			PaymentStatus   string    `json:"payment_status"`
+		}
+
+		err = dbPool.QueryRow(ctx, `
+			SELECT 
+				b.booking_id, b.provider_id, b.client_id, 
+				u.username as client_username, u.phone as client_phone,
+				sp.package_name, sp.duration, b.total_price, b.status,
+				b.location, p.address as location_address, 
+				p.latitude, p.longitude,
+				b.special_notes, b.start_time, b.end_time,
+				ci.status as check_in_status, ci.check_in_id,
+				CASE WHEN t.transaction_id IS NOT NULL THEN 'paid' ELSE 'pending' END as payment_status
+			FROM bookings b
+			JOIN users u ON b.client_id = u.user_id
+			JOIN service_packages sp ON b.package_id = sp.package_id
+			LEFT JOIN user_profiles p ON b.client_id = p.user_id
+			LEFT JOIN booking_check_ins ci ON b.booking_id = ci.booking_id AND ci.status = 'active'
+			LEFT JOIN transactions t ON b.booking_id = t.booking_id AND t.status = 'completed'
+			WHERE b.booking_id = $1
+		`, bookingID).Scan(
+			&result.BookingID, &result.ProviderID, &result.ClientID,
+			&result.ClientUsername, &result.ClientPhone,
+			&result.PackageName, &result.Duration, &result.TotalPrice, &result.Status,
+			&result.Location, &result.LocationAddress,
+			&result.Latitude, &result.Longitude,
+			&result.SpecialNotes, &result.StartTime, &result.EndTime,
+			&result.CheckInStatus, &result.CheckInID,
+			&result.PaymentStatus,
+		)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found"})
+			return
+		}
+
+		// Only provider can view this
+		if userID != result.ProviderID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Only provider can view work details"})
+			return
+		}
+
+		// Only show client location if booking is confirmed or paid
+		if result.Status != "confirmed" && result.Status != "paid" && result.Status != "in_progress" {
+			result.LocationAddress = nil
+			result.Latitude = nil
+			result.Longitude = nil
+			result.ClientPhone = nil
+		}
+
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+// --- POST /provider/location/update (อัพเดทพิกัด Provider) ---
+func updateProviderLocationHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, _ := c.Get("userID")
+
+		var input struct {
+			Latitude  float64 `json:"latitude" binding:"required"`
+			Longitude float64 `json:"longitude" binding:"required"`
+			BookingID *int    `json:"booking_id"` // Optional: if working on a specific booking
+		}
+
+		if err := c.ShouldBindJSON(&input); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Update user's current location
+		_, err := dbPool.Exec(ctx, `
+			UPDATE user_profiles 
+			SET latitude = $1, longitude = $2, updated_at = NOW()
+			WHERE user_id = $3
+		`, input.Latitude, input.Longitude, userID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update location"})
+			return
+		}
+
+		// If there's an active booking, update check-in location too
+		if input.BookingID != nil {
+			dbPool.Exec(ctx, `
+				UPDATE booking_check_ins 
+				SET latitude = $1, longitude = $2, updated_at = NOW()
+				WHERE booking_id = $3 AND provider_id = $4 AND status = 'active'
+			`, input.Latitude, input.Longitude, *input.BookingID, userID)
+		}
+
+		// Also update last_active
+		dbPool.Exec(ctx, `
+			UPDATE users SET last_active = NOW(), is_online = true WHERE user_id = $1
+		`, userID)
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":   "Location updated",
+			"latitude":  input.Latitude,
+			"longitude": input.Longitude,
+		})
+	}
+}

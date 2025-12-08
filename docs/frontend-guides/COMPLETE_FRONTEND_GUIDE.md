@@ -396,6 +396,113 @@ function LanguageSwitcher() {
 5. **Test both languages** before deployment
 6. **Default to Thai** for Thai audience
 
+### 🗣️ Provider Languages Filter
+
+Backend stores provider's spoken languages in the `languages` field as an array of language codes.
+
+#### Supported Language Codes:
+```javascript
+const supportedLanguages = {
+  th: 'Thai (ไทย)',
+  en: 'English',
+  zh: 'Chinese (中文)',
+  ja: 'Japanese (日本語)',
+  ko: 'Korean (한국어)',
+  fr: 'French (Français)',
+  de: 'German (Deutsch)',
+  es: 'Spanish (Español)',
+  ru: 'Russian (Русский)',
+  ar: 'Arabic (العربية)'
+};
+```
+
+#### Filter by Languages:
+```javascript
+// Single language
+const results = await apiCall('/browse/search?languages=th');
+
+// Multiple languages (providers who speak ANY of these)
+const results = await apiCall('/browse/search?languages=th,en,zh');
+
+// Combined with other filters
+const results = await apiCall('/browse/search?location=Bangkok&languages=en,zh&rating=4');
+```
+
+#### Display Languages in Profile:
+```jsx
+function ProviderProfile({ provider }) {
+  const languageNames = {
+    th: { th: 'ไทย', en: 'Thai' },
+    en: { th: 'อังกฤษ', en: 'English' },
+    zh: { th: 'จีน', en: 'Chinese' },
+    ja: { th: 'ญี่ปุ่น', en: 'Japanese' },
+    ko: { th: 'เกาหลี', en: 'Korean' }
+  };
+  
+  const { language } = useTranslation();
+
+  return (
+    <div>
+      <h3>Languages Spoken (ภาษาที่สื่อสารได้)</h3>
+      <div className="languages">
+        {provider.languages.map(langCode => (
+          <span key={langCode} className="language-badge">
+            {languageNames[langCode]?.[language] || langCode}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+#### Advanced Language Filter Component:
+```jsx
+function LanguageFilter({ selectedLanguages, onChange }) {
+  const { t } = useTranslation();
+  
+  const languages = [
+    { code: 'th', label: 'ไทย', flag: '🇹🇭' },
+    { code: 'en', label: 'English', flag: '🇬🇧' },
+    { code: 'zh', label: '中文', flag: '🇨🇳' },
+    { code: 'ja', label: '日本語', flag: '🇯🇵' },
+    { code: 'ko', label: '한국어', flag: '🇰🇷' }
+  ];
+
+  const toggleLanguage = (code) => {
+    const current = selectedLanguages.split(',').filter(Boolean);
+    const newSelection = current.includes(code)
+      ? current.filter(l => l !== code)
+      : [...current, code];
+    onChange(newSelection.join(','));
+  };
+
+  return (
+    <div className="language-filter">
+      <label>{t('search.languages')}</label>
+      <div className="language-checkboxes">
+        {languages.map(({ code, label, flag }) => (
+          <label key={code} className="language-option">
+            <input
+              type="checkbox"
+              checked={selectedLanguages.includes(code)}
+              onChange={() => toggleLanguage(code)}
+            />
+            <span>{flag} {label}</span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Usage:
+<LanguageFilter
+  selectedLanguages={filters.languages}
+  onChange={(langs) => setFilters({...filters, languages: langs, page: 1})}
+/>
+```
+
 ---
 
 ## ⚠️ Breaking Changes (December 2025)
@@ -456,6 +563,7 @@ const results = await apiCall('/browse/search?location=Bangkok&rating=4&tier=3&s
 - `tier` - Provider level (1-4)
 - `category` - Category ID
 - `service_type` - "Incall", "Outcall", "Both"
+- `languages` - Comma-separated language codes (e.g., "th,en,zh")
 - `sort` - "rating", "reviews", "price"
 - `page`, `limit` - Pagination
 
@@ -655,6 +763,9 @@ async function searchProviders(filters = {}) {
   if (filters.category) params.append('category', filters.category);
   if (filters.service_type) params.append('service_type', filters.service_type);
   
+  // Languages filter
+  if (filters.languages) params.append('languages', filters.languages);
+  
   // Sorting & Pagination
   if (filters.sort) params.append('sort', filters.sort);
   if (filters.page) params.append('page', filters.page);
@@ -674,13 +785,14 @@ const bangkokProviders = await searchProviders({ location: 'Bangkok' });
 // 3. High-rated providers
 const topRated = await searchProviders({ rating: 4.5, sort: 'rating' });
 
-// 4. Advanced filters
+// 4. Advanced filters with languages
 const results = await searchProviders({
   location: 'Bangkok',
   rating: 4,
   tier: 3,
   category: 1,
   service_type: 'Both',
+  languages: 'th,en,zh', // Filter by spoken languages
   sort: 'reviews',
   page: 1,
   limit: 20
@@ -700,6 +812,7 @@ interface SearchResponse {
     rating_avg: number;
     review_count: number;
     service_type: string;
+    languages: string[]; // Array of language codes: ["th", "en", "zh"]
     location: string;
     min_price: number;
   }>;
@@ -721,16 +834,17 @@ import { apiCall } from '@/lib/api';
 
 function ProviderSearch() {
   const [providers, setProviders] = useState([]);
-  const [loading, setLoading] = useState(false);
   const [filters, setFilters] = useState({
     location: '',
     rating: '',
     tier: '',
     category: '',
     service_type: '',
+    languages: '', // e.g., "th,en" or "th,en,zh"
     sort: 'rating',
     page: 1,
     limit: 20
+  });imit: 20
   });
   const [pagination, setPagination] = useState(null);
 
@@ -775,7 +889,6 @@ function ProviderSearch() {
           <option value="4">4+ stars</option>
           <option value="4.5">4.5+ stars</option>
         </select>
-        
         <select
           value={filters.service_type}
           onChange={(e) => setFilters({...filters, service_type: e.target.value, page: 1})}
@@ -786,6 +899,22 @@ function ProviderSearch() {
           <option value="Both">Both</option>
         </select>
         
+        {/* Language Filter */}
+        <select
+          multiple
+          value={filters.languages.split(',').filter(Boolean)}
+          onChange={(e) => {
+            const selected = Array.from(e.target.selectedOptions, option => option.value);
+            setFilters({...filters, languages: selected.join(','), page: 1});
+          }}
+        >
+          <option value="th">Thai (ไทย)</option>
+          <option value="en">English</option>
+          <option value="zh">Chinese (中文)</option>
+          <option value="ja">Japanese (日本語)</option>
+          <option value="ko">Korean (한국어)</option>
+        </select>
+        
         <select
           value={filters.sort}
           onChange={(e) => setFilters({...filters, sort: e.target.value, page: 1})}
@@ -793,6 +922,7 @@ function ProviderSearch() {
           <option value="rating">Best Rating</option>
           <option value="reviews">Most Reviews</option>
           <option value="price">Lowest Price</option>
+        </select> value="price">Lowest Price</option>
         </select>
       </div>
 
@@ -804,23 +934,40 @@ function ProviderSearch() {
           <div className="providers-grid">
             {providers.map(provider => (
               <ProviderCard key={provider.user_id} provider={provider} />
-            ))}
-          </div>
-          
-          {pagination && (
-            <Pagination
-              currentPage={pagination.page}
-              totalPages={pagination.total_pages}
-              onPageChange={(page) => setFilters({...filters, page})}
-            />
-          )}
-        </>
+function ProviderCard({ provider }) {
+  // Language name mapping
+  const languageNames = {
+    th: 'ไทย',
+    en: 'English',
+    zh: '中文',
+    ja: '日本語',
+    ko: '한국어'
+  };
+
+  return (
+    <div className="provider-card">
+      <img 
+        src={provider.profile_picture_url || '/default-avatar.png'} 
+        alt={provider.username} 
+      />
+      <h3>{provider.username}</h3>
+      <p>{provider.bio}</p>
+      
+      {/* Languages spoken */}
+      {provider.languages && provider.languages.length > 0 && (
+        <div className="languages">
+          🗣️ {provider.languages.map(lang => languageNames[lang] || lang).join(', ')}
+        </div>
       )}
+      
+      <div className="rating">
+        ⭐ {provider.rating_avg.toFixed(1)} ({provider.review_count} reviews)
+      </div>
+      <div className="price">From ฿{provider.min_price}</div>
+      <span className="tier">{provider.provider_level_name}</span>
     </div>
   );
-}
-
-function ProviderCard({ provider }) {
+}unction ProviderCard({ provider }) {
   return (
     <div className="provider-card">
       <img 
@@ -1656,9 +1803,10 @@ describe('Authentication', () => {
 
   it('should return user profile', async () => {
     localStorage.setItem('token', 'test-token');
-    const user = await apiCall('/users/me');
-    expect(user).toHaveProperty('user_id');
-    expect(user).toHaveProperty('profile_picture_url'); // NEW field name
+      "service_type": "Both",
+      "languages": ["th", "en", "zh"],
+      "location": "Bangkok, Sukhumvit",
+      "min_price": 1500.00perty('profile_picture_url'); // NEW field name
   });
 });
 ```

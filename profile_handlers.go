@@ -36,14 +36,15 @@ func getProfileByUserID(dbPool *pgxpool.Pool, ctx context.Context, userID int) (
 			u.first_name,
 			u.last_name,
 			u.google_profile_picture,
-		p.profile_image_url,
-		p.bio,
-		p.location,
-		p.age
-	FROM users u
-	LEFT JOIN user_profiles p ON u.user_id = p.user_id
-	LEFT JOIN tiers t ON u.tier_id = t.tier_id
-	WHERE u.user_id = $1`,
+			COALESCE(u.profile_picture_url, u.google_profile_picture) as profile_picture_url,
+			p.profile_image_url,
+			p.bio,
+			p.location,
+			p.age
+		FROM users u
+		LEFT JOIN user_profiles p ON u.user_id = p.user_id
+		LEFT JOIN tiers t ON u.tier_id = t.tier_id
+		WHERE u.user_id = $1`,
 		userID,
 	).Scan(
 		&user.UserID,
@@ -60,6 +61,7 @@ func getProfileByUserID(dbPool *pgxpool.Pool, ctx context.Context, userID int) (
 		&user.FirstName,
 		&user.LastName,
 		&user.GoogleProfilePicture,
+		&user.ProfilePictureURL,
 		&user.ProfileImageUrl,
 		&user.Bio,
 		&user.Location,

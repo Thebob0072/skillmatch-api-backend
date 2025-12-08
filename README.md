@@ -11,6 +11,24 @@ Go-based REST API with real-time messaging, payment processing, and face verific
 
 ---
 
+## 📚 Documentation
+
+### 👉 For Frontend Team
+**[FRONTEND_COMPLETE_GUIDE.md](FRONTEND_COMPLETE_GUIDE.md)** - Complete integration guide:
+- ✅ **119 API Endpoints** with examples
+- ✅ **Filter System** (location, rating, tier, category, service_type, languages)
+- ✅ **Translation Guide** (Thai/English) - ข้อมูลไหนที่ Backend ส่งมา vs ต้องแปลเอง
+- ✅ **Authentication & Authorization**
+- ✅ **Real-time WebSocket**
+- ✅ **React Components Examples**
+
+### For Backend Team
+- [.github/copilot-instructions.md](.github/copilot-instructions.md) - Development guidelines
+- [docs/backend-guides/DATABASE_STRUCTURE.md](docs/backend-guides/DATABASE_STRUCTURE.md) - Database schema
+- [docs/system-guides/](docs/system-guides/) - System guides
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites

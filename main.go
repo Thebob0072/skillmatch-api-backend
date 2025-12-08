@@ -106,9 +106,17 @@ func main() {
 		dbPool.QueryRow(ctx, "SELECT NOW()").Scan(&pgTime)
 		c.JSON(http.StatusOK, gin.H{"message": "pong!", "postgres_time": pgTime})
 	})
-	router.GET("/tiers", getTiersHandler(dbPool, ctx)) // (from tier_handlers.go)
 
-	// Authentication & Registration Routes
+	// Health Check Endpoints
+	router.GET("/health", healthCheckHandler(dbPool, rdb, ctx))     // Comprehensive health check
+	router.GET("/health/ready", readinessCheckHandler(dbPool, ctx)) // Readiness probe
+	router.GET("/health/live", livenessCheckHandler())              // Liveness probe
+
+	// System Info & Stats (Public)
+	router.GET("/api/info", getServerInfoHandler())                     // Server information
+	router.GET("/api/stats/system", getSystemStatsHandler(dbPool, ctx)) // System statistics (public)
+
+	router.GET("/tiers", getTiersHandler(dbPool, ctx))                           // (from tier_handlers.go)	// Authentication & Registration Routes
 	router.POST("/auth/send-verification", sendVerificationHandler(dbPool, ctx)) // ส่ง OTP ไปทาง email (from email_verification.go)
 	router.POST("/auth/verify-email", verifyEmailHandler(dbPool, ctx))           // ยืนยัน OTP (from email_verification.go)
 	router.POST("/register", registerWithVerificationHandler(dbPool, ctx))       // สมัครสมาชิก (User - ต้องยืนยัน OTP ก่อน) (from email_verification.go)
@@ -135,8 +143,9 @@ func main() {
 		protected.GET("/browse/users", browseUsersHandler(dbPool, ctx)) // (from browse_handlers.go)
 
 		// Verification (KYC) Routes
-		protected.POST("/verification/start", startVerificationHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx)) // (from verification_handlers.go)
-		protected.POST("/verification/submit", submitVerificationHandler(dbPool, ctx))                               // (from verification_handlers.go)
+		protected.POST("/verification/start", startVerificationHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx))                    // (from verification_handlers.go)
+		protected.POST("/verification/submit", submitVerificationHandler(dbPool, ctx))                                                  // (from verification_handlers.go)
+		protected.POST("/verification/provider-submit", providerSubmitVerificationHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx)) // (from verification_handlers.go)
 
 		// Photo Gallery Routes
 		protected.GET("/photos/me", getMyPhotosHandler(dbPool, ctx))                                          // (from photo_handlers.go)
@@ -161,6 +170,10 @@ func main() {
 		protected.GET("/bookings/my", getMyBookingsHandler(dbPool, ctx))                              // ดูการจองของตัวเอง (client)
 		protected.GET("/bookings/provider", getProviderBookingsHandler(dbPool, ctx))                  // ดูการจองที่เข้ามา (provider)
 		protected.PATCH("/bookings/:id/status", updateBookingStatusHandler(dbPool, ctx))              // อัพเดทสถานะการจอง
+		protected.GET("/bookings/:id/work-details", getBookingWorkDetailsHandler(dbPool, ctx))        // 🆕 รายละเอียด booking สำหรับ provider ทำงาน
+		protected.GET("/bookings/:id/extension-packages", getExtensionPackagesHandler(dbPool, ctx))   // 🆕 ดูแพ็คเกจต่อเวลา
+		protected.POST("/bookings/extend", extendBookingHandler(dbPool, ctx))                         // 🆕 ต่อเวลา booking
+		protected.POST("/provider/location/update", updateProviderLocationHandler(dbPool, ctx))       // 🆕 อัพเดทพิกัด provider
 
 		// 🆕 Review Routes
 		protected.POST("/reviews", createReviewHandler(dbPool, ctx)) // สร้างรีวิว
@@ -230,6 +243,42 @@ func main() {
 		protected.GET("/provider/schedule/me", getMySchedulesHandler(dbPool, ctx))             // ดูตารางงานของตัวเอง
 		protected.PATCH("/provider/schedule/:scheduleId", updateScheduleHandler(dbPool, ctx))  // แก้ไขตารางงาน
 		protected.DELETE("/provider/schedule/:scheduleId", deleteScheduleHandler(dbPool, ctx)) // ลบตารางงาน
+
+		// 🆕 Safety Features (from safety_handlers.go)
+		protected.POST("/safety/trusted-contacts", addTrustedContactHandler(dbPool, ctx))          // เพิ่มผู้ติดต่อฉุกเฉิน
+		protected.GET("/safety/trusted-contacts", getTrustedContactsHandler(dbPool, ctx))          // ดูผู้ติดต่อฉุกเฉิน
+		protected.DELETE("/safety/trusted-contacts/:id", deleteTrustedContactHandler(dbPool, ctx)) // ลบผู้ติดต่อฉุกเฉิน
+		protected.POST("/safety/sos", triggerSOSHandler(dbPool, ctx))                              // ส่ง SOS Alert
+		protected.POST("/safety/check-in", checkInHandler(dbPool, ctx))                            // Check-in เริ่มงาน
+		protected.POST("/safety/check-out", checkOutHandler(dbPool, ctx))                          // Check-out จบงาน
+
+		// 🆕 Private Gallery (from safety_handlers.go)
+		protected.GET("/gallery/private/settings", getPrivateGallerySettingsHandler(dbPool, ctx))    // ดูตั้งค่า private gallery
+		protected.PUT("/gallery/private/settings", updatePrivateGallerySettingsHandler(dbPool, ctx)) // อัพเดทตั้งค่า
+		protected.POST("/gallery/private/photos", uploadPrivatePhotoHandler(dbPool, ctx))            // อัพโหลดรูปลับ
+		protected.GET("/gallery/private/:userId", getPrivateGalleryHandler(dbPool, ctx))             // ดู private gallery
+		protected.POST("/gallery/private/purchase", purchaseGalleryAccessHandler(dbPool, ctx))       // ซื้อสิทธิ์ดู private gallery
+
+		// 🆕 Deposit & Cancellation (from promotion_handlers.go)
+		protected.GET("/provider/deposit-settings", getDepositSettingsHandler(dbPool, ctx))          // ดูตั้งค่ามัดจำ
+		protected.PUT("/provider/deposit-settings", updateDepositSettingsHandler(dbPool, ctx))       // อัพเดทตั้งค่ามัดจำ
+		protected.POST("/bookings/:id/deposit/pay", payDepositHandler(dbPool, ctx))                  // จ่ายมัดจำ
+		protected.GET("/provider/cancellation-policy", getCancellationPolicyHandler(dbPool, ctx))    // ดูนโยบายยกเลิก
+		protected.PUT("/provider/cancellation-policy", updateCancellationPolicyHandler(dbPool, ctx)) // อัพเดทนโยบายยกเลิก
+		protected.POST("/bookings/:id/cancel", cancelBookingWithFeeHandler(dbPool, ctx))             // ยกเลิก booking พร้อมคำนวณค่าปรับ
+
+		// 🆕 Profile Boost (from promotion_handlers.go)
+		protected.GET("/boost/packages", getBoostPackagesHandler(dbPool, ctx)) // ดูแพ็คเกจ boost
+		protected.POST("/boost/purchase", purchaseBoostHandler(dbPool, ctx))   // ซื้อ boost
+		protected.GET("/boost/active", getActiveBoostsHandler(dbPool, ctx))    // ดู boost ที่ active
+
+		// 🆕 Coupons (from promotion_handlers.go)
+		protected.POST("/coupons", createCouponHandler(dbPool, ctx))         // สร้างคูปอง (Provider/Admin)
+		protected.POST("/coupons/apply", applyCouponHandler(dbPool, ctx))    // ใช้คูปอง
+		protected.GET("/coupons/my", getProviderCouponsHandler(dbPool, ctx)) // ดูคูปองของฉัน
+
+		// 🆕 Photo Verification Badge (from promotion_handlers.go)
+		protected.POST("/photos/:id/verify", submitPhotoVerificationHandler(dbPool, ctx)) // ส่งรูปเพื่อขอ verified badge
 	}
 
 	// Admin Routes (ต้อง Login และเป็น Admin)
@@ -269,10 +318,11 @@ func main() {
 		admin.POST("/wallets/:user_id/adjust", adminAdjustWalletHandler(dbPool, ctx))                    // ปรับยอด wallet (bonus/penalty)
 
 		// 🆕 Admin Provider Management
-		admin.GET("/providers/pending", getAdminPendingProvidersHandler(dbPool, ctx))        // ดู providers ที่รอตรวจสอบ (from provider_system_handlers.go)
-		admin.PATCH("/verify-document/:documentId", adminVerifyDocumentHandler(dbPool, ctx)) // อนุมัติ/ปฏิเสธเอกสาร (from provider_system_handlers.go)
-		admin.PATCH("/approve-provider/:userId", adminApproveProviderHandler(dbPool, ctx))   // อนุมัติ provider (from provider_system_handlers.go)
-		admin.GET("/provider-stats", getAdminProviderStatsHandler(dbPool, ctx))              // สถิติ providers (from provider_system_handlers.go)
+		admin.GET("/providers/pending", getAdminPendingProvidersHandler(dbPool, ctx))            // ดู providers ที่รอตรวจสอบ (from provider_system_handlers.go)
+		admin.PATCH("/verify-document/:documentId", adminVerifyDocumentHandler(dbPool, ctx))     // อนุมัติ/ปฏิเสธเอกสาร (from provider_system_handlers.go)
+		admin.PATCH("/approve-provider/:userId", adminApproveProviderHandler(dbPool, ctx))       // อนุมัติ provider (from provider_system_handlers.go)
+		admin.GET("/provider-stats", getAdminProviderStatsHandler(dbPool, ctx))                  // สถิติ providers (from provider_system_handlers.go)
+		admin.GET("/providers/:providerId/queue-info", getProviderQueueInfoHandler(dbPool, ctx)) // 🆕 ดูข้อมูล Queue และ Location ของ Provider
 
 		// 🆕 Admin Provider Tier Management
 		admin.POST("/recalculate-provider-tiers", adminRecalculateProviderTiersHandler(dbPool, ctx)) // คำนวณ Tier อัตโนมัติทั้งหมด (from provider_tier_handlers.go)
@@ -287,6 +337,15 @@ func main() {
 		// 🆕 Admin Schedule Viewing (from schedule_handlers.go)
 		admin.GET("/schedules/provider/:providerId", getProviderScheduleAdminHandler(dbPool, ctx)) // ดูตารางงานของ Provider คนใดคนหนึ่ง
 		admin.GET("/schedules/all", getAllProvidersScheduleAdminHandler(dbPool, ctx))              // ดูตารางงานของ Providers ทั้งหมด
+
+		// 🆕 Admin Safety Features (from safety_handlers.go)
+		admin.GET("/sos/active", getActiveSOSAlertsHandler(dbPool, ctx))      // ดู SOS alerts ที่ active
+		admin.PATCH("/sos/:id/resolve", resolveSOSHandler(dbPool, ctx))       // จัดการ SOS alert
+		admin.GET("/check-ins/active", getActiveCheckInsHandler(dbPool, ctx)) // ดู check-ins ที่ active
+
+		// 🆕 Admin Photo Verification (from promotion_handlers.go)
+		admin.GET("/photos/pending", getPendingPhotoVerificationsHandler(dbPool, ctx)) // ดูรูปที่รอ verify
+		admin.PATCH("/photos/:id/verify", adminVerifyPhotoHandler(dbPool, ctx))        // อนุมัติ/ปฏิเสธ verified badge
 	}
 
 	// GOD Routes (ต้อง Login และเป็น GOD tier 5)

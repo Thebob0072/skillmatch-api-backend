@@ -262,3 +262,100 @@ func adminCreateUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handl
 		c.JSON(http.StatusCreated, createdUser)
 	}
 }
+
+// --- Provider Queue Info (Admin/GOD only) ---
+type ProviderQueueInfo struct {
+	ProviderID      int               `json:"provider_id"`
+	ActiveBookings  int               `json:"active_bookings"`
+	PendingBookings int               `json:"pending_bookings"`
+	TotalQueue      int               `json:"total_queue"`
+	CurrentLocation *ProviderLocation `json:"current_location,omitempty"`
+	IsOnline        bool              `json:"is_online"`
+	LastActive      *time.Time        `json:"last_active,omitempty"`
+}
+
+type ProviderLocation struct {
+	Latitude    float64    `json:"latitude"`
+	Longitude   float64    `json:"longitude"`
+	Province    *string    `json:"province,omitempty"`
+	District    *string    `json:"district,omitempty"`
+	LastUpdated *time.Time `json:"last_updated,omitempty"`
+}
+
+func getProviderQueueInfoHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, err := strconv.Atoi(c.Param("providerId"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid provider ID"})
+			return
+		}
+
+		var queueInfo ProviderQueueInfo
+		queueInfo.ProviderID = providerID
+
+		// Get active bookings count (status = 'confirmed' or 'in_progress')
+		err = dbPool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM bookings 
+			WHERE provider_id = $1 
+			AND status IN ('confirmed', 'in_progress', 'accepted')
+			AND booking_date >= CURRENT_DATE
+		`, providerID).Scan(&queueInfo.ActiveBookings)
+		if err != nil {
+			log.Printf("Error getting active bookings for provider %d: %v", providerID, err)
+			queueInfo.ActiveBookings = 0
+		}
+
+		// Get pending bookings count
+		err = dbPool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM bookings 
+			WHERE provider_id = $1 
+			AND status = 'pending'
+			AND booking_date >= CURRENT_DATE
+		`, providerID).Scan(&queueInfo.PendingBookings)
+		if err != nil {
+			log.Printf("Error getting pending bookings for provider %d: %v", providerID, err)
+			queueInfo.PendingBookings = 0
+		}
+
+		queueInfo.TotalQueue = queueInfo.ActiveBookings + queueInfo.PendingBookings
+
+		// Get provider location from user_profiles
+		var lat, lng *float64
+		var province, district *string
+		var lastLogin *time.Time
+		err = dbPool.QueryRow(ctx, `
+			SELECT 
+				p.latitude, 
+				p.longitude, 
+				p.province,
+				p.district,
+				u.registration_date as last_login
+			FROM users u
+			LEFT JOIN user_profiles p ON u.user_id = p.user_id
+			WHERE u.user_id = $1
+		`, providerID).Scan(&lat, &lng, &province, &district, &lastLogin)
+
+		if err == nil && lat != nil && lng != nil {
+			queueInfo.CurrentLocation = &ProviderLocation{
+				Latitude:    *lat,
+				Longitude:   *lng,
+				Province:    province,
+				District:    district,
+				LastUpdated: lastLogin,
+			}
+		}
+
+		// Check if provider is "online" (has bookings today or active recently)
+		var recentActivity int
+		err = dbPool.QueryRow(ctx, `
+			SELECT COUNT(*) FROM bookings 
+			WHERE provider_id = $1 
+			AND booking_date = CURRENT_DATE
+		`, providerID).Scan(&recentActivity)
+		queueInfo.IsOnline = recentActivity > 0 || queueInfo.ActiveBookings > 0
+
+		queueInfo.LastActive = lastLogin
+
+		c.JSON(http.StatusOK, queueInfo)
+	}
+}

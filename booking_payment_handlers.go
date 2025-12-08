@@ -240,3 +240,237 @@ func handleBookingPayment(dbPool *pgxpool.Pool, ctx context.Context, checkoutSes
 
 	return nil
 }
+
+// --- GET /bookings/:id/extension-packages (ดูแพ็คเกจต่อเวลา) ---
+func getExtensionPackagesHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		bookingID, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid booking ID"})
+			return
+		}
+
+		// Get booking to calculate extension prices
+		var basePrice float64
+		var duration int
+		err = dbPool.QueryRow(ctx, `
+			SELECT b.total_price, sp.duration
+			FROM bookings b
+			JOIN service_packages sp ON b.package_id = sp.package_id
+			WHERE b.booking_id = $1
+		`, bookingID).Scan(&basePrice, &duration)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found"})
+			return
+		}
+
+		// Calculate per-minute rate
+		perMinuteRate := basePrice / float64(duration)
+
+		// Generate extension packages
+		packages := []gin.H{
+			{"minutes": 30, "price": perMinuteRate * 30 * 0.9, "label": "30 minutes"}, // 10% discount
+			{"minutes": 60, "price": perMinuteRate * 60 * 0.85, "label": "1 hour"},    // 15% discount
+			{"minutes": 120, "price": perMinuteRate * 120 * 0.8, "label": "2 hours"},  // 20% discount
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"booking_id":      bookingID,
+			"base_price":      basePrice,
+			"per_minute_rate": perMinuteRate,
+			"packages":        packages,
+		})
+	}
+}
+
+// --- POST /bookings/extend (ต่อเวลา Booking) ---
+func extendBookingHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID, exists := c.Get("userID")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User not authenticated"})
+			return
+		}
+
+		var req struct {
+			BookingID         int     `json:"booking_id" binding:"required"`
+			AdditionalMinutes int     `json:"additional_minutes" binding:"required"`
+			Price             float64 `json:"price" binding:"required"`
+			SuccessURL        string  `json:"success_url"`
+			CancelURL         string  `json:"cancel_url"`
+		}
+
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		// Verify booking exists and is active
+		var providerID, clientID int
+		var status string
+		err := dbPool.QueryRow(ctx, `
+			SELECT provider_id, client_id, status
+			FROM bookings
+			WHERE booking_id = $1
+		`, req.BookingID).Scan(&providerID, &clientID, &status)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found"})
+			return
+		}
+
+		// Only client or provider can extend
+		if userID != providerID && userID != clientID {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized"})
+			return
+		}
+
+		// Verify booking is in progress
+		if status != "confirmed" && status != "paid" && status != "in_progress" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Booking must be active to extend"})
+			return
+		}
+
+		// Create Stripe checkout session for extension
+		successURL := req.SuccessURL
+		cancelURL := req.CancelURL
+		if successURL == "" {
+			successURL = fmt.Sprintf("http://localhost:5174/booking/extend-success?booking_id=%d", req.BookingID)
+		}
+		if cancelURL == "" {
+			cancelURL = "http://localhost:5174/booking/extend-cancel"
+		}
+
+		priceInCents := int64(req.Price * 100)
+
+		params := &stripe.CheckoutSessionParams{
+			Mode: stripe.String(string(stripe.CheckoutSessionModePayment)),
+			LineItems: []*stripe.CheckoutSessionLineItemParams{
+				{
+					PriceData: &stripe.CheckoutSessionLineItemPriceDataParams{
+						Currency: stripe.String("thb"),
+						ProductData: &stripe.CheckoutSessionLineItemPriceDataProductDataParams{
+							Name:        stripe.String(fmt.Sprintf("Session Extension +%d minutes", req.AdditionalMinutes)),
+							Description: stripe.String(fmt.Sprintf("Extend booking #%d by %d minutes", req.BookingID, req.AdditionalMinutes)),
+						},
+						UnitAmount: stripe.Int64(priceInCents),
+					},
+					Quantity: stripe.Int64(1),
+				},
+			},
+			SuccessURL:        stripe.String(successURL),
+			CancelURL:         stripe.String(cancelURL),
+			ClientReferenceID: stripe.String(fmt.Sprintf("%d", userID)),
+			Metadata: map[string]string{
+				"payment_type":       "booking_extension",
+				"booking_id":         fmt.Sprintf("%d", req.BookingID),
+				"provider_id":        fmt.Sprintf("%d", providerID),
+				"additional_minutes": fmt.Sprintf("%d", req.AdditionalMinutes),
+			},
+		}
+
+		stripeSession, err := session.New(params)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create payment session"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"checkout_url":       stripeSession.URL,
+			"session_id":         stripeSession.ID,
+			"booking_id":         req.BookingID,
+			"additional_minutes": req.AdditionalMinutes,
+			"amount":             req.Price,
+		})
+	}
+}
+
+// Helper: Handle Booking Extension Payment from Webhook
+func handleBookingExtension(dbPool *pgxpool.Pool, ctx context.Context, checkoutSession stripe.CheckoutSession) error {
+	bookingID := checkoutSession.Metadata["booking_id"]
+	providerIDStr := checkoutSession.Metadata["provider_id"]
+	additionalMinutesStr := checkoutSession.Metadata["additional_minutes"]
+
+	if bookingID == "" || providerIDStr == "" || additionalMinutesStr == "" {
+		return fmt.Errorf("missing metadata for booking extension")
+	}
+
+	additionalMinutes, _ := strconv.Atoi(additionalMinutesStr)
+	totalAmount := float64(checkoutSession.AmountTotal) / 100
+	stripeFee := totalAmount * 0.0275
+	platformCommission := totalAmount * 0.1000
+	providerEarnings := totalAmount * 0.8725
+
+	// Update booking end_time
+	_, err := dbPool.Exec(ctx, `
+		UPDATE bookings 
+		SET end_time = end_time + INTERVAL '1 minute' * $1,
+		    total_price = total_price + $2,
+		    updated_at = NOW()
+		WHERE booking_id = $3
+	`, additionalMinutes, totalAmount, bookingID)
+
+	if err != nil {
+		return fmt.Errorf("failed to update booking: %v", err)
+	}
+
+	// Update check-in expected_end_time
+	dbPool.Exec(ctx, `
+		UPDATE booking_check_ins 
+		SET expected_end_time = expected_end_time + INTERVAL '1 minute' * $1,
+		    updated_at = NOW()
+		WHERE booking_id = $2 AND status = 'active'
+	`, additionalMinutes, bookingID)
+
+	// Create transaction record
+	var transactionID int
+	err = dbPool.QueryRow(ctx, `
+		INSERT INTO transactions (
+			user_id, type, amount, status, booking_id,
+			stripe_fee, platform_commission, total_fee_percentage, net_amount
+		)
+		VALUES ($1, 'booking_extension', $2, 'completed', $3, $4, $5, 0.1275, $6)
+		RETURNING transaction_id
+	`, providerIDStr, totalAmount, bookingID, stripeFee, platformCommission, providerEarnings).Scan(&transactionID)
+
+	if err != nil {
+		return fmt.Errorf("failed to create transaction: %v", err)
+	}
+
+	// Add to provider's pending balance
+	dbPool.Exec(ctx, `
+		UPDATE wallets 
+		SET pending_balance = pending_balance + $1,
+		    total_earned = total_earned + $1,
+		    updated_at = NOW()
+		WHERE user_id = $2
+	`, providerEarnings, providerIDStr)
+
+	// Notify provider
+	providerIDInt, _ := strconv.Atoi(providerIDStr)
+	CreateNotification(providerIDInt, "booking_extended",
+		fmt.Sprintf("Booking extended by %d minutes. Additional payment: ฿%.0f", additionalMinutes, providerEarnings),
+		map[string]interface{}{
+			"booking_id":         bookingID,
+			"additional_minutes": additionalMinutes,
+			"amount":             providerEarnings,
+		})
+
+	// WebSocket notification
+	if wsManager != nil {
+		wsManager.BroadcastToUser(providerIDInt, WebSocketMessage{
+			Type: "booking_extended",
+			Payload: map[string]interface{}{
+				"booking_id":         bookingID,
+				"additional_minutes": additionalMinutes,
+				"amount":             providerEarnings,
+			},
+		})
+	}
+
+	fmt.Printf("✅ Booking extended: BookingID=%s, +%d minutes, Amount=฿%.2f\n",
+		bookingID, additionalMinutes, totalAmount)
+
+	return nil
+}

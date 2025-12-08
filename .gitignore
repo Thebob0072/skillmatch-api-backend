@@ -43,3 +43,7 @@ backup.sh
 # Docker volumes
 postgres_data/
 redis_data/
+
+# Binary files
+main
+server
