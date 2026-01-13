@@ -58,7 +58,7 @@ func updateDepositSettingsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin
 
 		// Validate percentage (10-50%)
 		if input.DepositPercentage < 0.10 || input.DepositPercentage > 0.50 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Deposit percentage must be between 10% and 50%"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "เปอร์เซ็นต์เงินมัดจำต้องอยู่ระหว่าง 10% ถึง 50%"})
 			return
 		}
 
@@ -70,11 +70,11 @@ func updateDepositSettingsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin
 		`, userID, input.RequireDeposit, input.DepositPercentage)
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update settings"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถอัปเดตการตั้งค่าได้"})
 			return
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "Deposit settings updated"})
+		c.JSON(http.StatusOK, gin.H{"message": "อัปเดตการตั้งค่าเงินมัดจำสำเร็จ"})
 	}
 }
 
@@ -96,12 +96,12 @@ func payDepositHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 		`, bookingID).Scan(&clientID, &providerID, &totalPrice, &depositPercentage)
 
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบการจอง"})
 			return
 		}
 
 		if userID != clientID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Only client can pay deposit"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "เฉพาะลูกค้าเท่านั้นที่สามารถจ่ายเงินมัดจำได้"})
 			return
 		}
 
@@ -111,7 +111,7 @@ func payDepositHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 		var existingID int
 		err = dbPool.QueryRow(ctx, `SELECT deposit_id FROM booking_deposits WHERE booking_id = $1`, bookingID).Scan(&existingID)
 		if err == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Deposit already paid"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "จ่ายเงินมัดจำไปแล้ว"})
 			return
 		}
 
@@ -126,7 +126,7 @@ func payDepositHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 		`, bookingID, clientID, providerID, depositAmount, depositPercentage).Scan(&depositID)
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process deposit"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดำเนินการเงินมัดจำได้"})
 			return
 		}
 
@@ -134,7 +134,7 @@ func payDepositHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 		dbPool.Exec(ctx, `UPDATE bookings SET status = 'deposit_paid' WHERE booking_id = $1`, bookingID)
 
 		// Notify provider
-		CreateNotification(providerID, "deposit_paid", "Client has paid the deposit", map[string]interface{}{
+		CreateNotification(providerID, "deposit_paid", "ลูกค้าชำระเงินมัดจำแล้ว", map[string]interface{}{
 			"booking_id": bookingID,
 			"amount":     depositAmount,
 		})
@@ -143,7 +143,7 @@ func payDepositHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 			"deposit_id": depositID,
 			"amount":     depositAmount,
 			"percentage": depositPercentage,
-			"message":    "Deposit paid successfully",
+			"message":    "ชำระเงินมัดจำสำเร็จ",
 			"remaining":  totalPrice - depositAmount,
 		})
 	}
@@ -169,7 +169,7 @@ func getCancellationPolicyHandler(dbPool *pgxpool.Pool, ctx context.Context) gin
 			ORDER BY hours_before_booking DESC
 		`, providerID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch policies"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงนโยบายการยกเลิกได้"})
 			return
 		}
 		defer rows.Close()
@@ -215,7 +215,7 @@ func updateCancellationPolicyHandler(dbPool *pgxpool.Pool, ctx context.Context) 
 			`, userID, policy.HoursBeforeBooking, policy.FeePercentage)
 		}
 
-		c.JSON(http.StatusOK, gin.H{"message": "Cancellation policy updated"})
+		c.JSON(http.StatusOK, gin.H{"message": "อัปเดตนโยบายการยกเลิกสำเร็จ"})
 	}
 }
 
@@ -241,12 +241,12 @@ func cancelBookingWithFeeHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.
 		`, bookingID).Scan(&clientID, &providerID, &totalPrice, &startTime)
 
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found or cannot be cancelled"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบการจองหรือไม่สามารถยกเลิกได้"})
 			return
 		}
 
 		if userID != clientID && userID != providerID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Unauthorized"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "ไม่มีสิทธิ์เข้าถึง"})
 			return
 		}
 
@@ -298,14 +298,14 @@ func cancelBookingWithFeeHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.
 		if userID == clientID {
 			notifyUserID = providerID
 		}
-		CreateNotification(notifyUserID, "booking_cancelled", "Booking has been cancelled", map[string]interface{}{
+		CreateNotification(notifyUserID, "booking_cancelled", "การจองถูกยกเลิกแล้ว", map[string]interface{}{
 			"booking_id":       bookingID,
 			"cancelled_by":     userID,
 			"cancellation_fee": feeAmount,
 		})
 
 		c.JSON(http.StatusOK, gin.H{
-			"message":             "Booking cancelled",
+			"message":             "ยกเลิกการจองสำเร็จ",
 			"cancellation_fee":    feeAmount,
 			"fee_percentage":      feePercentage,
 			"hours_until_booking": hoursUntilBooking,
@@ -327,7 +327,7 @@ func getBoostPackagesHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Hand
 			ORDER BY price ASC
 		`)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch packages"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูลแพ็คเกจได้"})
 			return
 		}
 		defer rows.Close()
@@ -363,7 +363,7 @@ func purchaseBoostHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 		`, input.PackageID).Scan(&pkg.PackageID, &pkg.Name, &pkg.BoostType, &pkg.Duration, &pkg.Price)
 
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Package not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบแพ็คเกจ"})
 			return
 		}
 
@@ -375,7 +375,7 @@ func purchaseBoostHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 		`, userID, pkg.BoostType).Scan(&existingBoostID)
 
 		if err == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "You already have an active boost of this type"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "คุณมี boost ประเภทนี้ที่ใช้งานอยู่แล้ว"})
 			return
 		}
 
@@ -392,7 +392,7 @@ func purchaseBoostHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 		`, userID, pkg.BoostType, startTime, endTime, pkg.Price).Scan(&boostID)
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to activate boost"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถเปิดใช้งาน boost ได้"})
 			return
 		}
 
@@ -402,7 +402,7 @@ func purchaseBoostHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handler
 			"start_time": startTime,
 			"end_time":   endTime,
 			"price":      pkg.Price,
-			"message":    "Boost activated successfully",
+			"message":    "เปิดใช้งาน boost สำเร็จ",
 		})
 	}
 }
@@ -419,7 +419,7 @@ func getActiveBoostsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handl
 			ORDER BY end_time ASC
 		`, userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch boosts"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูล boost ได้"})
 			return
 		}
 		defer rows.Close()
@@ -487,17 +487,17 @@ func createCouponHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 
 		if err != nil {
 			if strings.Contains(err.Error(), "duplicate") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Coupon code already exists"})
+				c.JSON(http.StatusBadRequest, gin.H{"error": "รหัสคูปองมีอยู่แล้ว"})
 				return
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create coupon"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถสร้างคูปองได้"})
 			return
 		}
 
 		c.JSON(http.StatusCreated, gin.H{
 			"coupon_id": couponID,
 			"code":      strings.ToUpper(input.Code),
-			"message":   "Coupon created successfully",
+			"message":   "สร้างคูปองสำเร็จ",
 		})
 	}
 }
@@ -525,19 +525,19 @@ func applyCouponHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 			&coupon.UsageLimit, &coupon.UsedCount, &coupon.ProviderID)
 
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Coupon not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบคูปอง"})
 			return
 		}
 
 		// Validate coupon
 		now := time.Now()
 		if now.Before(coupon.ValidFrom) || now.After(coupon.ValidUntil) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Coupon has expired or not yet valid"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "คูปองหมดอายุหรือยังไม่เปิดใช้งาน"})
 			return
 		}
 
 		if coupon.UsageLimit != nil && coupon.UsedCount >= *coupon.UsageLimit {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Coupon usage limit reached"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "คูปองถูกใช้ครบจำนวนที่กำหนดแล้ว"})
 			return
 		}
 
@@ -546,7 +546,7 @@ func applyCouponHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 		err = dbPool.QueryRow(ctx, `SELECT usage_id FROM coupon_usages WHERE coupon_id = $1 AND user_id = $2`,
 			coupon.CouponID, userID).Scan(&usageID)
 		if err == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "You have already used this coupon"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "คุณใช้คูปองนี้ไปแล้ว"})
 			return
 		}
 
@@ -559,19 +559,19 @@ func applyCouponHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 		`, input.BookingID, userID).Scan(&providerID, &totalPrice)
 
 		if err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Booking not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบการจอง"})
 			return
 		}
 
 		// Check if coupon is for this provider
 		if coupon.ProviderID != nil && *coupon.ProviderID != providerID {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Coupon not valid for this provider"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "คูปองนี้ใช้ไม่ได้กับผู้ให้บริการนี้"})
 			return
 		}
 
 		// Check minimum booking amount
 		if coupon.MinBookingAmount != nil && totalPrice < *coupon.MinBookingAmount {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Booking amount below minimum required"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ยอดการจองต่ำกว่าขั้นต่ำที่กำหนด"})
 			return
 		}
 
@@ -609,7 +609,7 @@ func applyCouponHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 			"discount_amount": discountAmount,
 			"original_price":  totalPrice,
 			"new_total":       newTotal,
-			"message":         "Coupon applied successfully",
+			"message":         "ใช้คูปองสำเร็จ",
 		})
 	}
 }
@@ -627,7 +627,7 @@ func getProviderCouponsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Ha
 			ORDER BY created_at DESC
 		`, userID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch coupons"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูลคูปองได้"})
 			return
 		}
 		defer rows.Close()
@@ -665,6 +665,122 @@ func getProviderCouponsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Ha
 	}
 }
 
+// GET /coupons/browse - Browse all active coupons (Public)
+func browseCouponsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rows, err := dbPool.Query(ctx, `
+			SELECT c.coupon_id, c.code, c.discount_type, c.discount_value, c.min_booking_amount, 
+				   c.max_discount, c.valid_from, c.valid_until, c.usage_limit, c.used_count, 
+				   c.provider_id, u.username as provider_name
+			FROM coupons c
+			LEFT JOIN users u ON c.provider_id = u.user_id
+			WHERE c.is_active = true 
+			  AND c.valid_from <= NOW() 
+			  AND c.valid_until >= NOW()
+			  AND (c.usage_limit IS NULL OR c.used_count < c.usage_limit)
+			ORDER BY c.created_at DESC
+		`)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูลคูปองได้"})
+			return
+		}
+		defer rows.Close()
+
+		coupons := make([]gin.H, 0)
+		for rows.Next() {
+			var couponID, usedCount int
+			var code, discountType string
+			var discountValue float64
+			var minAmount, maxDiscount *float64
+			var validFrom, validUntil time.Time
+			var usageLimit, providerID *int
+			var providerName *string
+
+			rows.Scan(&couponID, &code, &discountType, &discountValue, &minAmount, &maxDiscount,
+				&validFrom, &validUntil, &usageLimit, &usedCount, &providerID, &providerName)
+
+			couponData := gin.H{
+				"coupon_id":          couponID,
+				"code":               code,
+				"discount_type":      discountType,
+				"discount_value":     discountValue,
+				"min_booking_amount": minAmount,
+				"max_discount":       maxDiscount,
+				"valid_from":         validFrom,
+				"valid_until":        validUntil,
+				"usage_limit":        usageLimit,
+				"used_count":         usedCount,
+			}
+
+			// Add provider info if coupon is provider-specific
+			if providerID != nil {
+				couponData["provider_id"] = *providerID
+				if providerName != nil {
+					couponData["provider_name"] = *providerName
+				}
+			} else {
+				couponData["provider_name"] = "Platform-wide"
+			}
+
+			coupons = append(coupons, couponData)
+		}
+
+		c.JSON(http.StatusOK, coupons)
+	}
+}
+
+// GET /coupons/provider/:providerId - Get coupons for specific provider
+func getProviderPublicCouponsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		providerID, _ := strconv.Atoi(c.Param("providerId"))
+
+		rows, err := dbPool.Query(ctx, `
+			SELECT c.coupon_id, c.code, c.discount_type, c.discount_value, c.min_booking_amount, 
+				   c.max_discount, c.valid_from, c.valid_until, c.usage_limit, c.used_count
+			FROM coupons c
+			WHERE c.provider_id = $1 
+			  AND c.is_active = true 
+			  AND c.valid_from <= NOW() 
+			  AND c.valid_until >= NOW()
+			  AND (c.usage_limit IS NULL OR c.used_count < c.usage_limit)
+			ORDER BY c.created_at DESC
+		`, providerID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูลคูปองได้"})
+			return
+		}
+		defer rows.Close()
+
+		coupons := make([]gin.H, 0)
+		for rows.Next() {
+			var couponID, usedCount int
+			var code, discountType string
+			var discountValue float64
+			var minAmount, maxDiscount *float64
+			var validFrom, validUntil time.Time
+			var usageLimit *int
+
+			rows.Scan(&couponID, &code, &discountType, &discountValue, &minAmount, &maxDiscount,
+				&validFrom, &validUntil, &usageLimit, &usedCount)
+
+			coupons = append(coupons, gin.H{
+				"coupon_id":          couponID,
+				"code":               code,
+				"discount_type":      discountType,
+				"discount_value":     discountValue,
+				"min_booking_amount": minAmount,
+				"max_discount":       maxDiscount,
+				"valid_from":         validFrom,
+				"valid_until":        validUntil,
+				"usage_limit":        usageLimit,
+				"used_count":         usedCount,
+			})
+		}
+
+		c.JSON(http.StatusOK, coupons)
+	}
+}
+
 // ================================
 // Verified Photo Badge Handlers
 // ================================
@@ -679,7 +795,7 @@ func submitPhotoVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) g
 		var ownerID int
 		err := dbPool.QueryRow(ctx, `SELECT user_id FROM user_photos WHERE photo_id = $1`, photoID).Scan(&ownerID)
 		if err != nil || ownerID != userID.(int) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Photo not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบรูปภาพ"})
 			return
 		}
 
@@ -690,7 +806,7 @@ func submitPhotoVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) g
 			WHERE photo_id = $1 AND status IN ('pending', 'verified')
 		`, photoID).Scan(&existingID)
 		if err == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Photo already submitted for verification"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "รูปภาพนี้ส่งขอยืนยันแล้ว"})
 			return
 		}
 
@@ -702,14 +818,14 @@ func submitPhotoVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) g
 		`, photoID, userID).Scan(&verificationID)
 
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit verification"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถส่งขอยืนยันได้"})
 			return
 		}
 
 		c.JSON(http.StatusCreated, gin.H{
 			"verification_id": verificationID,
 			"status":          "pending",
-			"message":         "Photo submitted for verification",
+			"message":         "ส่งขอยืนยันรูปภาพสำเร็จ",
 		})
 	}
 }
@@ -741,7 +857,7 @@ func adminVerifyPhotoHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Hand
 		`, status, adminID, input.Reason, photoID)
 
 		if err != nil || result.RowsAffected() == 0 {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Verification request not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบคำขอยืนยัน"})
 			return
 		}
 
@@ -752,8 +868,13 @@ func adminVerifyPhotoHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Hand
 			`, photoID)
 		}
 
+		messageText := "อนุมัติการยืนยันรูปภาพสำเร็จ"
+		if input.Action == "reject" {
+			messageText = "ปฏิเสธการยืนยันรูปภาพสำเร็จ"
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"message": "Photo verification " + input.Action + "d",
+			"message": messageText,
 			"status":  status,
 		})
 	}
@@ -771,7 +892,7 @@ func getPendingPhotoVerificationsHandler(dbPool *pgxpool.Pool, ctx context.Conte
 			ORDER BY pv.created_at ASC
 		`)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch verifications"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "ไม่สามารถดึงข้อมูลคำขอยืนยันได้"})
 			return
 		}
 		defer rows.Close()

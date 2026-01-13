@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "skillmatch-production",
+  "private_key_id": "4ec4be1185eaa9127fac506eb26cbde268a3320d",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQC/MXU53deLfcpV\nyCEXY2zLEDwpC7gXNvw4QdU98L3RLfbxn3ljXyg3ILR47aqjuiysa2pHubnVeUf6\n9EPpDu/hv3hjsM3CilFoBVC1335LtECy/31cJugleJXQRDGZOA8h87HeGtxC2p6V\nyWZ/WHnn0Jkh4/MG6dDVQKBuoqkU8Nix39s+NY+jUW4jXXzF4xqrXdGK+YvtqkAr\nbzAzaYjdqSvI5x3Yx64b4HuXT0+D/3JEHhPBzhn0i+IsJzUs/wpX19iOPWryeQKH\nHhj8ah4yyJ60iWFET9wDJcG3JlOhOCdxpklgeyrw+stABwdlvw7wuuRhR5NkJfRj\n3NPYqT8bAgMBAAECggEADRBxYE4nmwgNh8WZd4uEYpMuIlUDGIZsUU6huI43GjUF\nso+Fy3YPhrOqrwFB3US/AZLM11T6PQ2TM7NjvbE7dGNahijEexwic5mV80Lv0ncF\npnWEL4Q77YAdb/a2pXjcJ9nmU1mdFVvOCf+SDBsBcXTrpBIyGkywEM271mExkfB7\nDEeJqmAV6U/pedTccircWcQNOiXt7kcuXADGPngHSo+mMpOnYELpfulUt2/MJRLQ\n1B34aErCGf06CIvLMxdtJrEYQmltjbNqId0F8RMpRmud5X3VUU7OItwgo8X/VZG/\noPQ3RPbVcUDTioTE1VVNaLYkN7cn7zWZ5LoxJwhIAQKBgQDysql09GQL0wxh5tBk\nrPI6jq27ob1yJ3q2edfOVGZbOa9NnpmAVple3gjdR3iMDQ+CYzUGFlwmTZfLRKmi\nwn1jBvxPKFYoqZ/FcnspK6+YAWf9cbJn+U3IRfydIb24wTlF07zLNpBptd+w7/5Q\nuEB2Jtb5DlQ/+baw5BoDne4zGwKBgQDJrB/KDIik0Rabpj/KAZuLj0BI190PlBfd\n/M6EgAsOdY9puoKemXrvTTrfZaOVImgQ3hRyDB7h8emozFJgcVSmTfodjY/pEJDb\n48ZRU+U9glTcKTQodJw0loaKc7FjX+vmG/LfKCvvIXJ9UlwyjULbLsYuKwbhZ56C\nkVKT7BXkAQKBgEH3J7H/PzYrjgEKMHg8vbYG09fc9VYSvvrcETkmnY+MFUbepdBJ\nOXScmwIyC+TdI+sHtgDKkQ9kJa79IbJ4dIY2/tsxFoIE4MVVAX7GPfrt3ur3PUuf\nanHV+/xlkGCoPD3reDQvx37EDWHVSWV9PyAeHG4jY+jjobFgvmVfRsAjAoGAfUI0\nKGlqgXwAX8J9gjlHZAIgel3gxqlDvbQkjPV+aIeqAJBASsOnMHS2aUSWuq05F6jn\n6AIROGLprtbhH1ekrPpnq+1eAfMxFfI+HgtOqcqGbIwHAk2TK7KGc/3xonhUa4LW\ncbZgu1D57E64RwmoCbzeiJRe3KdgM1aRhKCw5AECgYBpHFszPlABCzyreGBvixNt\n/kAH/lhCjhpbMLWPOyDNiXiqxg3E978rgEuHDWIPeLjGjOmEELQfapWx0c2r166y\nQHR5QVc6AIy8hr6SLL7EV4ZOZg6MqKqD9Fr6w6ybsmQ4YrIEXgvTlGfTJzRbeZI/\noD8zzGCSFhSDy7+Rpn6CHw==\n-----END PRIVATE KEY-----\n",
+  "client_email": "skillmatch-storage@skillmatch-production.iam.gserviceaccount.com",
+  "client_id": "102938056743414877727",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/skillmatch-storage%40skillmatch-production.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

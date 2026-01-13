@@ -33,6 +33,7 @@ func getProfileByUserID(dbPool *pgxpool.Pool, ctx context.Context, userID int) (
 			u.phone_number,
 			u.verification_status,
 			u.is_admin,
+			COALESCE(u.user_type::text, 'client') as user_type,
 			u.first_name,
 			u.last_name,
 			u.google_profile_picture,
@@ -58,6 +59,7 @@ func getProfileByUserID(dbPool *pgxpool.Pool, ctx context.Context, userID int) (
 		&user.PhoneNumber,
 		&user.VerificationStatus,
 		&user.IsAdmin,
+		&user.UserType,
 		&user.FirstName,
 		&user.LastName,
 		&user.GoogleProfilePicture,
@@ -77,8 +79,8 @@ func getProfileByUserID(dbPool *pgxpool.Pool, ctx context.Context, userID int) (
 	user.Skills = []string{}
 
 	// Debug logging
-	log.Printf("✅ Profile fetched - UserID: %d, Username: %s, Email: %s, TierID: %d, IsAdmin: %v",
-		user.UserID, user.Username, user.Email, user.TierID, user.IsAdmin)
+	log.Printf("✅ Profile fetched - UserID: %d, TierID: %d, IsAdmin: %v",
+		user.UserID, user.TierID, user.IsAdmin)
 
 	if user.Skills == nil {
 		user.Skills = make([]string, 0)

@@ -92,3 +92,82 @@ func adminAuthMiddleware(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 		c.Next()
 	}
 }
+
+// (ยามตัวที่ 3: ตรวจสอบว่าเป็น GOD หรือไม่)
+func godAuthMiddleware(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+
+		userIDInterface, exists := c.Get("userID")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+			c.Abort()
+			return
+		}
+
+		userID, ok := userIDInterface.(int)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid User ID format"})
+			c.Abort()
+			return
+		}
+
+		// (ตรวจสอบใน Database ว่าเป็น GOD หรือไม่)
+		var userType string
+		err := dbPool.QueryRow(ctx, "SELECT user_type FROM users WHERE user_id = $1", userID).Scan(&userType)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check user type"})
+			c.Abort()
+			return
+		}
+
+		if userType != "god" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "This action requires GOD privileges. Only the supreme administrator can perform this operation."})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// (ยามตัวที่ 4: ตรวจสอบว่าเป็น Admin หรือ GOD)
+func adminOrGodAuthMiddleware(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+
+		userIDInterface, exists := c.Get("userID")
+		if !exists {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
+			c.Abort()
+			return
+		}
+
+		userID, ok := userIDInterface.(int)
+		if !ok {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid User ID format"})
+			c.Abort()
+			return
+		}
+
+		// (ตรวจสอบว่าเป็น Admin หรือ GOD)
+		var userType string
+		var isAdmin bool
+		err := dbPool.QueryRow(ctx,
+			"SELECT user_type, is_admin FROM users WHERE user_id = $1",
+			userID,
+		).Scan(&userType, &isAdmin)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			c.Abort()
+			return
+		}
+
+		// Allow if GOD or Admin
+		if userType != "god" && !isAdmin {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Admin or GOD privileges required"})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}

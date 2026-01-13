@@ -893,7 +893,9 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 			provider_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
 			old_tier_id INT REFERENCES tiers(tier_id),
 			new_tier_id INT NOT NULL REFERENCES tiers(tier_id),
+			change_type VARCHAR(20) DEFAULT 'manual',
 			changed_at TIMESTAMPTZ DEFAULT NOW(),
+			changed_by INT REFERENCES users(user_id),
 			reason TEXT
 		);
 
@@ -903,6 +905,34 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 		log.Printf("Warning: Migration 031 error: %v\n", err)
 	} else {
 		fmt.Println("✅ Migration 031: Provider Tier History completed!")
+	}
+
+	// --- Migration 031B: Provider Tier Upgrade Requests (Admin Approval) ---
+	fmt.Println("🔄 Running Migration 031B: Provider Tier Upgrade Requests...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS provider_tier_upgrade_requests (
+			request_id SERIAL PRIMARY KEY,
+			user_id INT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+			current_tier_id INT REFERENCES tiers(tier_id),
+			requested_tier_id INT NOT NULL REFERENCES tiers(tier_id),
+			status VARCHAR(20) DEFAULT 'pending', -- 'pending', 'approved', 'rejected'
+			payment_status VARCHAR(20) DEFAULT 'unpaid', -- 'unpaid', 'paid', 'refunded'
+			stripe_subscription_id VARCHAR(255),
+			stripe_payment_intent_id VARCHAR(255),
+			requested_at TIMESTAMPTZ DEFAULT NOW(),
+			reviewed_at TIMESTAMPTZ,
+			reviewed_by INT REFERENCES users(user_id),
+			admin_notes TEXT,
+			rejection_reason TEXT
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_upgrade_requests_user ON provider_tier_upgrade_requests(user_id);
+		CREATE INDEX IF NOT EXISTS idx_upgrade_requests_status ON provider_tier_upgrade_requests(status);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 031B error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 031B: Provider Tier Upgrade Requests completed!")
 	}
 
 	// --- Migration 032: Fix Service Categories Schema ---
@@ -955,6 +985,59 @@ func runMigrations(dbPool *pgxpool.Pool, ctx context.Context) {
 		} else {
 			fmt.Println("✅ Migration 034: Safety & Business Features completed!")
 		}
+	}
+
+	// --- Migration 035: Payments Table for QR Code ---
+	fmt.Println("🔄 Running Migration 035: Payments Table...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS payments (
+			payment_id SERIAL PRIMARY KEY,
+			booking_id INT NOT NULL REFERENCES bookings(booking_id) ON DELETE CASCADE,
+			amount DECIMAL(10, 2) NOT NULL,
+			payment_method VARCHAR(50) NOT NULL DEFAULT 'promptpay', -- 'promptpay', 'stripe', 'cash'
+			payment_status VARCHAR(50) NOT NULL DEFAULT 'pending', -- 'pending', 'completed', 'failed', 'expired'
+			payment_reference VARCHAR(100) UNIQUE NOT NULL, -- unique payment ref
+			qr_code TEXT, -- PromptPay QR Code string
+			transaction_id VARCHAR(100), -- Bank transaction ref
+			slip_image TEXT, -- URL to payment slip image
+			paid_at TIMESTAMP,
+			expires_at TIMESTAMP, -- QR expiration
+			created_at TIMESTAMP DEFAULT NOW(),
+			updated_at TIMESTAMP DEFAULT NOW()
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_payments_booking ON payments(booking_id);
+		CREATE INDEX IF NOT EXISTS idx_payments_reference ON payments(payment_reference);
+		CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(payment_status);
+
+		-- Add payment_method and payment_status to bookings
+		ALTER TABLE bookings 
+			ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50),
+			ADD COLUMN IF NOT EXISTS payment_status VARCHAR(50) DEFAULT 'unpaid';
+
+		CREATE INDEX IF NOT EXISTS idx_bookings_payment_status ON bookings(payment_status);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 035 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 035: Payments Table completed!")
+	}
+
+	// --- Migration 036: Email Verifications Table ---
+	fmt.Println("🔄 Running Migration 036: Email Verifications Table...")
+	_, err = dbPool.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS email_verifications (
+			email VARCHAR(255) PRIMARY KEY,
+			otp VARCHAR(6) NOT NULL,
+			expires_at TIMESTAMP NOT NULL,
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_email_verifications_expires ON email_verifications(expires_at);
+	`)
+	if err != nil {
+		log.Printf("Warning: Migration 036 error: %v\n", err)
+	} else {
+		fmt.Println("✅ Migration 036: Email Verifications Table completed!")
 	}
 
 	fmt.Println("✅ All Database Migrations สำเร็จ!")

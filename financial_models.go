@@ -30,15 +30,13 @@ type BankAccount struct {
 // ================================
 
 type Wallet struct {
-	WalletID            int       `json:"wallet_id"`
-	UserID              int       `json:"user_id"`
-	AvailableBalance    float64   `json:"available_balance"`
-	PendingBalance      float64   `json:"pending_balance"`
-	TotalEarned         float64   `json:"total_earned"`
-	TotalWithdrawn      float64   `json:"total_withdrawn"`
-	TotalCommissionPaid float64   `json:"total_commission_paid"`
-	LastUpdated         time.Time `json:"last_updated"`
-	CreatedAt           time.Time `json:"created_at"`
+	WalletID         int       `json:"wallet_id"`
+	UserID           int       `json:"user_id"`
+	AvailableBalance float64   `json:"available_balance"`
+	PendingBalance   float64   `json:"pending_balance"`
+	TotalEarned      float64   `json:"total_earned"`
+	TotalWithdrawn   float64   `json:"total_withdrawn"`
+	LastUpdated      time.Time `json:"last_updated"`
 }
 
 // ================================

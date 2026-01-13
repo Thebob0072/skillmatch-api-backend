@@ -31,6 +31,7 @@ type User struct {
 	PhoneNumber        *string   `json:"phone_number"`
 	VerificationStatus string    `json:"verification_status"`
 	IsAdmin            bool      `json:"is_admin"`
+	UserType           string    `json:"user_type"` // client, provider, admin, god
 	FirstName          *string   `json:"first_name"`
 	LastName           *string   `json:"last_name"`
 

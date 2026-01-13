@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.21-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -32,7 +32,6 @@ COPY --from=builder /skillmatch-api .
 
 # Copy necessary files
 COPY --from=builder /app/docs ./docs
-COPY --from=builder /app/key ./key
 
 # Create non-root user
 RUN addgroup -g 1000 appuser && \

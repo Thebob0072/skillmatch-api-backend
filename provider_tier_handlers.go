@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,6 +27,202 @@ import (
 // - Diamond (tier 3): 250-399 points
 // - Premium (tier 4): 400+ points
 // ============================================================================
+
+// GET /provider/available-tiers - ดู Tiers ทั้งหมดที่สามารถอัพเกรดได้
+func getAvailableTiersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rows, err := dbPool.Query(ctx, `
+			SELECT tier_id, name, access_level, price_monthly
+			FROM tiers
+			WHERE tier_id BETWEEN 2 AND 4  -- Silver, Diamond, Premium only
+			ORDER BY tier_id ASC
+		`)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tiers"})
+			return
+		}
+		defer rows.Close()
+
+		type TierInfo struct {
+			TierID       int     `json:"tier_id"`
+			Name         string  `json:"name"`
+			AccessLevel  int     `json:"access_level"`
+			PriceMonthly float64 `json:"price_monthly"`
+		}
+
+		tiers := []TierInfo{}
+		for rows.Next() {
+			var tier TierInfo
+			if err := rows.Scan(&tier.TierID, &tier.Name, &tier.AccessLevel, &tier.PriceMonthly); err != nil {
+				continue
+			}
+			tiers = append(tiers, tier)
+		}
+
+		c.JSON(http.StatusOK, gin.H{"tiers": tiers})
+	}
+}
+
+// POST /provider/request-upgrade - ส่งคำขออัพเกรด Tier (ต้องรอแอดมินอนุมัติ)
+func requestProviderTierUpgradeHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetInt("user_id")
+
+		var req struct {
+			TierID int `json:"tier_id" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+			return
+		}
+
+		// ตรวจสอบว่าเป็น provider และยืนยันแล้ว
+		var isProvider bool
+		var verificationStatus string
+		var currentTierID int
+		err := dbPool.QueryRow(ctx, `
+			SELECT is_provider, provider_verification_status, provider_level_id
+			FROM users
+			WHERE user_id = $1
+		`, userID).Scan(&isProvider, &verificationStatus, &currentTierID)
+
+		if err != nil || !isProvider {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not a provider"})
+			return
+		}
+
+		if verificationStatus != "approved" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Provider not approved"})
+			return
+		}
+
+		// ตรวจสอบว่า tier ที่ต้องการสูงกว่า tier ปัจจุบัน
+		if req.TierID <= currentTierID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Can only upgrade to higher tier"})
+			return
+		}
+
+		// ตรวจสอบว่า tier ที่ต้องการมีอยู่จริง (2-4 เท่านั้น)
+		if req.TierID < 2 || req.TierID > 4 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tier for upgrade"})
+			return
+		}
+
+		// ตรวจสอบว่ามีคำขออยู่แล้วหรือไม่
+		var existingRequestID int
+		err = dbPool.QueryRow(ctx, `
+			SELECT request_id
+			FROM provider_tier_upgrade_requests
+			WHERE user_id = $1 AND status = 'pending'
+			LIMIT 1
+		`, userID).Scan(&existingRequestID)
+
+		if err == nil {
+			c.JSON(http.StatusConflict, gin.H{"error": "You already have a pending upgrade request"})
+			return
+		}
+
+		// ดึงข้อมูล tier
+		var tierName string
+		var priceMonthly float64
+		err = dbPool.QueryRow(ctx, `
+			SELECT name, price_monthly
+			FROM tiers
+			WHERE tier_id = $1
+		`, req.TierID).Scan(&tierName, &priceMonthly)
+
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Tier not found"})
+			return
+		}
+
+		// สร้างคำขออัพเกรด
+		var requestID int
+		err = dbPool.QueryRow(ctx, `
+			INSERT INTO provider_tier_upgrade_requests (
+				user_id, current_tier_id, requested_tier_id, status, payment_status
+			) VALUES ($1, $2, $3, 'pending', 'unpaid')
+			RETURNING request_id
+		`, userID, currentTierID, req.TierID).Scan(&requestID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create upgrade request"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"request_id":    requestID,
+			"tier_id":       req.TierID,
+			"tier_name":     tierName,
+			"price_monthly": priceMonthly,
+			"status":        "pending",
+			"message":       "Upgrade request submitted. Waiting for admin approval.",
+		})
+	}
+}
+
+// GET /provider/my-upgrade-requests - ดูคำขออัพเกรดของตัวเอง
+func getMyUpgradeRequestsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetInt("user_id")
+
+		rows, err := dbPool.Query(ctx, `
+			SELECT 
+				r.request_id,
+				r.current_tier_id,
+				ct.name as current_tier_name,
+				r.requested_tier_id,
+				rt.name as requested_tier_name,
+				rt.price_monthly,
+				r.status,
+				r.payment_status,
+				r.requested_at,
+				r.reviewed_at,
+				r.rejection_reason
+			FROM provider_tier_upgrade_requests r
+			LEFT JOIN tiers ct ON r.current_tier_id = ct.tier_id
+			LEFT JOIN tiers rt ON r.requested_tier_id = rt.tier_id
+			WHERE r.user_id = $1
+			ORDER BY r.requested_at DESC
+		`, userID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch requests"})
+			return
+		}
+		defer rows.Close()
+
+		type UpgradeRequest struct {
+			RequestID         int     `json:"request_id"`
+			CurrentTierID     *int    `json:"current_tier_id"`
+			CurrentTierName   *string `json:"current_tier_name"`
+			RequestedTierID   int     `json:"requested_tier_id"`
+			RequestedTierName string  `json:"requested_tier_name"`
+			PriceMonthly      float64 `json:"price_monthly"`
+			Status            string  `json:"status"`
+			PaymentStatus     string  `json:"payment_status"`
+			RequestedAt       string  `json:"requested_at"`
+			ReviewedAt        *string `json:"reviewed_at"`
+			RejectionReason   *string `json:"rejection_reason"`
+		}
+
+		requests := []UpgradeRequest{}
+		for rows.Next() {
+			var req UpgradeRequest
+			if err := rows.Scan(
+				&req.RequestID, &req.CurrentTierID, &req.CurrentTierName,
+				&req.RequestedTierID, &req.RequestedTierName, &req.PriceMonthly,
+				&req.Status, &req.PaymentStatus, &req.RequestedAt,
+				&req.ReviewedAt, &req.RejectionReason,
+			); err != nil {
+				continue
+			}
+			requests = append(requests, req)
+		}
+
+		c.JSON(http.StatusOK, gin.H{"requests": requests})
+	}
+}
 
 // GET /provider/my-tier - ดู Tier ปัจจุบันของตัวเอง
 func getMyProviderTierHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
@@ -104,6 +301,199 @@ func getMyProviderTierHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		}
 
 		c.JSON(http.StatusOK, result)
+	}
+}
+
+// GET /admin/upgrade-requests - ดูคำขออัพเกรดทั้งหมด (Admin only)
+func adminGetUpgradeRequestsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		status := c.DefaultQuery("status", "pending") // pending, approved, rejected, all
+
+		query := `
+			SELECT 
+				r.request_id,
+				r.user_id,
+				u.username,
+				u.email,
+				r.current_tier_id,
+				ct.name as current_tier_name,
+				r.requested_tier_id,
+				rt.name as requested_tier_name,
+				rt.price_monthly,
+				r.status,
+				r.payment_status,
+				r.requested_at,
+				r.reviewed_at,
+				r.reviewed_by,
+				r.admin_notes,
+				r.rejection_reason
+			FROM provider_tier_upgrade_requests r
+			LEFT JOIN users u ON r.user_id = u.user_id
+			LEFT JOIN tiers ct ON r.current_tier_id = ct.tier_id
+			LEFT JOIN tiers rt ON r.requested_tier_id = rt.tier_id
+		`
+
+		var rows pgx.Rows
+		var err error
+
+		if status == "all" {
+			query += ` ORDER BY r.requested_at DESC`
+			rows, err = dbPool.Query(ctx, query)
+		} else {
+			query += ` WHERE r.status = $1 ORDER BY r.requested_at DESC`
+			rows, err = dbPool.Query(ctx, query, status)
+		}
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch requests"})
+			return
+		}
+		defer rows.Close()
+
+		type UpgradeRequest struct {
+			RequestID         int     `json:"request_id"`
+			UserID            int     `json:"user_id"`
+			Username          string  `json:"username"`
+			Email             string  `json:"email"`
+			CurrentTierID     *int    `json:"current_tier_id"`
+			CurrentTierName   *string `json:"current_tier_name"`
+			RequestedTierID   int     `json:"requested_tier_id"`
+			RequestedTierName string  `json:"requested_tier_name"`
+			PriceMonthly      float64 `json:"price_monthly"`
+			Status            string  `json:"status"`
+			PaymentStatus     string  `json:"payment_status"`
+			RequestedAt       string  `json:"requested_at"`
+			ReviewedAt        *string `json:"reviewed_at"`
+			ReviewedBy        *int    `json:"reviewed_by"`
+			AdminNotes        *string `json:"admin_notes"`
+			RejectionReason   *string `json:"rejection_reason"`
+		}
+
+		requests := []UpgradeRequest{}
+		for rows.Next() {
+			var req UpgradeRequest
+			if err := rows.Scan(
+				&req.RequestID, &req.UserID, &req.Username, &req.Email,
+				&req.CurrentTierID, &req.CurrentTierName,
+				&req.RequestedTierID, &req.RequestedTierName, &req.PriceMonthly,
+				&req.Status, &req.PaymentStatus, &req.RequestedAt,
+				&req.ReviewedAt, &req.ReviewedBy, &req.AdminNotes, &req.RejectionReason,
+			); err != nil {
+				continue
+			}
+			requests = append(requests, req)
+		}
+
+		c.JSON(http.StatusOK, gin.H{"requests": requests})
+	}
+}
+
+// POST /admin/upgrade-requests/:requestId/approve - อนุมัติคำขออัพเกรด (Admin only)
+func adminApproveUpgradeRequestHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		adminID := c.GetInt("user_id")
+		requestID := c.Param("requestId")
+
+		var req struct {
+			AdminNotes string `json:"admin_notes"`
+		}
+		c.ShouldBindJSON(&req)
+
+		// ดึงข้อมูลคำขอ
+		var userID, requestedTierID int
+		var status, paymentStatus string
+		err := dbPool.QueryRow(ctx, `
+			SELECT user_id, requested_tier_id, status, payment_status
+			FROM provider_tier_upgrade_requests
+			WHERE request_id = $1
+		`, requestID).Scan(&userID, &requestedTierID, &status, &paymentStatus)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
+			return
+		}
+
+		if status != "pending" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Request already processed"})
+			return
+		}
+
+		// อัปเดตสถานะเป็น approved
+		_, err = dbPool.Exec(ctx, `
+			UPDATE provider_tier_upgrade_requests
+			SET status = 'approved',
+				reviewed_at = NOW(),
+				reviewed_by = $1,
+				admin_notes = $2
+			WHERE request_id = $3
+		`, adminID, req.AdminNotes, requestID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to approve request"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "Upgrade request approved. User can now proceed to payment.",
+			"request_id": requestID,
+			"user_id":    userID,
+		})
+	}
+}
+
+// POST /admin/upgrade-requests/:requestId/reject - ปฏิเสธคำขออัพเกรด (Admin only)
+func adminRejectUpgradeRequestHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		adminID := c.GetInt("user_id")
+		requestID := c.Param("requestId")
+
+		var req struct {
+			RejectionReason string `json:"rejection_reason" binding:"required"`
+			AdminNotes      string `json:"admin_notes"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Rejection reason is required"})
+			return
+		}
+
+		// ดึงข้อมูลคำขอ
+		var status string
+		err := dbPool.QueryRow(ctx, `
+			SELECT status
+			FROM provider_tier_upgrade_requests
+			WHERE request_id = $1
+		`, requestID).Scan(&status)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Request not found"})
+			return
+		}
+
+		if status != "pending" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Request already processed"})
+			return
+		}
+
+		// อัปเดตสถานะเป็น rejected
+		_, err = dbPool.Exec(ctx, `
+			UPDATE provider_tier_upgrade_requests
+			SET status = 'rejected',
+				reviewed_at = NOW(),
+				reviewed_by = $1,
+				rejection_reason = $2,
+				admin_notes = $3
+			WHERE request_id = $4
+		`, adminID, req.RejectionReason, req.AdminNotes, requestID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reject request"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "Upgrade request rejected",
+			"request_id": requestID,
+		})
 	}
 }
 

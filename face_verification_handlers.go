@@ -14,24 +14,24 @@ import (
 
 // FaceVerification model
 type FaceVerification struct {
-	VerificationID     int       `json:"verification_id"`
-	UserID             int       `json:"user_id"`
-	SelfieURL          string    `json:"selfie_url"`
-	LivenessVideoURL   *string   `json:"liveness_video_url,omitempty"`
-	MatchConfidence    *float64  `json:"match_confidence,omitempty"`
-	IsMatch            bool      `json:"is_match"`
-	NationalIDPhotoURL *string   `json:"national_id_photo_url,omitempty"`
-	LivenessPassed     bool      `json:"liveness_passed"`
-	LivenessConfidence *float64  `json:"liveness_confidence,omitempty"`
-	VerificationStatus string    `json:"verification_status"`
-	APIProvider        *string   `json:"api_provider,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
+	VerificationID     int        `json:"verification_id"`
+	UserID             int        `json:"user_id"`
+	SelfieURL          string     `json:"selfie_url"`
+	LivenessVideoURL   *string    `json:"liveness_video_url,omitempty"`
+	MatchConfidence    *float64   `json:"match_confidence,omitempty"`
+	IsMatch            bool       `json:"is_match"`
+	NationalIDPhotoURL *string    `json:"national_id_photo_url,omitempty"`
+	LivenessPassed     bool       `json:"liveness_passed"`
+	LivenessConfidence *float64   `json:"liveness_confidence,omitempty"`
+	VerificationStatus string     `json:"verification_status"`
+	APIProvider        *string    `json:"api_provider,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
 	VerifiedAt         *time.Time `json:"verified_at,omitempty"`
-	VerifiedBy         *int      `json:"verified_by,omitempty"`
-	RejectionReason    *string   `json:"rejection_reason,omitempty"`
-	RetryCount         int       `json:"retry_count"`
-	DocumentType       string    `json:"document_type"`        // "national_id" or "passport"
-	DocumentID         *int      `json:"document_id,omitempty"` // References provider_documents.document_id
+	VerifiedBy         *int       `json:"verified_by,omitempty"`
+	RejectionReason    *string    `json:"rejection_reason,omitempty"`
+	RetryCount         int        `json:"retry_count"`
+	DocumentType       string     `json:"document_type"`         // "national_id" or "passport"
+	DocumentID         *int       `json:"document_id,omitempty"` // References provider_documents.document_id
 }
 
 // --- 1. Submit Face Verification (Provider uploads selfie) ---
@@ -39,37 +39,37 @@ func submitFaceVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) gi
 	return func(c *gin.Context) {
 		userID := c.GetInt("userID")
 
-	var req struct {
-		SelfieURL        string  `json:"selfie_url" binding:"required"`
-		LivenessVideoURL *string `json:"liveness_video_url"`
-		DocumentID       int     `json:"document_id" binding:"required"`       // ID ของเอกสารที่อัปโหลดไว้แล้ว (บัตรประชาชนหรือพาสปอร์ต)
-		DocumentType     string  `json:"document_type" binding:"required,oneof=national_id passport"` // ประเภทเอกสาร: national_id หรือ passport
-	}
+		var req struct {
+			SelfieURL        string  `json:"selfie_url" binding:"required"`
+			LivenessVideoURL *string `json:"liveness_video_url"`
+			DocumentID       int     `json:"document_id" binding:"required"`                              // ID ของเอกสารที่อัปโหลดไว้แล้ว (บัตรประชาชนหรือพาสปอร์ต)
+			DocumentType     string  `json:"document_type" binding:"required,oneof=national_id passport"` // ประเภทเอกสาร: national_id หรือ passport
+		}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
+		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request", "details": err.Error()})
 			return
 		}
 
-	// ดึง URL ของรูปเอกสาร (บัตรประชาชนหรือพาสปอร์ต) จาก provider_documents
-	var documentURL string
-	var dbDocumentType string
-	err := dbPool.QueryRow(ctx, `
+		// ดึง URL ของรูปเอกสาร (บัตรประชาชนหรือพาสปอร์ต) จาก provider_documents
+		var documentURL string
+		var dbDocumentType string
+		err := dbPool.QueryRow(ctx, `
 		SELECT file_url, document_type
 		FROM provider_documents 
 		WHERE document_id = $1 AND user_id = $2 AND document_type = $3
 	`, req.DocumentID, userID, req.DocumentType).Scan(&documentURL, &dbDocumentType)
 
-	if err != nil {
-		docTypeThai := "บัตรประชาชน"
-		if req.DocumentType == "passport" {
-			docTypeThai = "พาสปอร์ต"
-		}
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("เอกสาร%sไม่พบ", docTypeThai)})
-		return
-	}	// บันทึกข้อมูล face verification (ยังไม่ทำการตรวจสอบจริง)
-	var verificationID int
-	err = dbPool.QueryRow(ctx, `
+		if err != nil {
+			docTypeThai := "บัตรประชาชน"
+			if req.DocumentType == "passport" {
+				docTypeThai = "พาสปอร์ต"
+			}
+			c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("เอกสาร%sไม่พบ", docTypeThai)})
+			return
+		} // บันทึกข้อมูล face verification (ยังไม่ทำการตรวจสอบจริง)
+		var verificationID int
+		err = dbPool.QueryRow(ctx, `
 		INSERT INTO face_verifications (
 			user_id, selfie_url, liveness_video_url, 
 			national_id_photo_url, document_type, document_id,
@@ -78,7 +78,7 @@ func submitFaceVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) gi
 	RETURNING verification_id
 `, userID, req.SelfieURL, req.LivenessVideoURL, documentURL, req.DocumentType, req.DocumentID).Scan(&verificationID)
 
-	if err != nil {
+		if err != nil {
 			log.Printf("Error inserting face verification: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit face verification"})
 			return
@@ -102,8 +102,8 @@ func getMyFaceVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) gin
 	return func(c *gin.Context) {
 		userID := c.GetInt("userID")
 
-	var verification FaceVerification
-	err := dbPool.QueryRow(ctx, `
+		var verification FaceVerification
+		err := dbPool.QueryRow(ctx, `
 		SELECT 
 			verification_id, user_id, selfie_url, liveness_video_url,
 			match_confidence, is_match, national_id_photo_url,
@@ -115,24 +115,24 @@ func getMyFaceVerificationHandler(dbPool *pgxpool.Pool, ctx context.Context) gin
 		ORDER BY created_at DESC
 		LIMIT 1
 		`, userID).Scan(
-		&verification.VerificationID,
-		&verification.UserID,
-		&verification.SelfieURL,
-		&verification.LivenessVideoURL,
-		&verification.MatchConfidence,
-		&verification.IsMatch,
-		&verification.NationalIDPhotoURL,
-		&verification.LivenessPassed,
-		&verification.LivenessConfidence,
-		&verification.VerificationStatus,
-		&verification.APIProvider,
-		&verification.CreatedAt,
-		&verification.VerifiedAt,
-		&verification.VerifiedBy,
-		&verification.RejectionReason,
-		&verification.RetryCount,
-		&verification.DocumentType,
-		&verification.DocumentID,
+			&verification.VerificationID,
+			&verification.UserID,
+			&verification.SelfieURL,
+			&verification.LivenessVideoURL,
+			&verification.MatchConfidence,
+			&verification.IsMatch,
+			&verification.NationalIDPhotoURL,
+			&verification.LivenessPassed,
+			&verification.LivenessConfidence,
+			&verification.VerificationStatus,
+			&verification.APIProvider,
+			&verification.CreatedAt,
+			&verification.VerifiedAt,
+			&verification.VerifiedBy,
+			&verification.RejectionReason,
+			&verification.RetryCount,
+			&verification.DocumentType,
+			&verification.DocumentID,
 		)
 
 		if err != nil {
@@ -149,7 +149,7 @@ func adminListFaceVerificationsHandler(dbPool *pgxpool.Pool, ctx context.Context
 	return func(c *gin.Context) {
 		status := c.DefaultQuery("status", "pending")
 
-	rows, err := dbPool.Query(ctx, `
+		rows, err := dbPool.Query(ctx, `
 		SELECT 
 			fv.verification_id, fv.user_id, u.username, u.email,
 			fv.selfie_url, fv.national_id_photo_url,
@@ -163,7 +163,7 @@ func adminListFaceVerificationsHandler(dbPool *pgxpool.Pool, ctx context.Context
 	ORDER BY fv.created_at DESC
 `, status)
 
-	if err != nil {
+		if err != nil {
 			log.Printf("Error querying face verifications: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch verifications"})
 			return
@@ -172,52 +172,52 @@ func adminListFaceVerificationsHandler(dbPool *pgxpool.Pool, ctx context.Context
 
 		var verifications []map[string]interface{}
 		for rows.Next() {
-		var v struct {
-			VerificationID     int
-			UserID             int
-			Username           string
-			Email              string
-			SelfieURL          string
-			NationalIDPhotoURL *string
-			MatchConfidence    *float64
-			IsMatch            bool
-			LivenessPassed     bool
-			LivenessConfidence *float64
-			VerificationStatus string
-			CreatedAt          time.Time
-		RetryCount         int
-		DocumentType       string
-		DocumentID         *int
-	}
+			var v struct {
+				VerificationID     int
+				UserID             int
+				Username           string
+				Email              string
+				SelfieURL          string
+				NationalIDPhotoURL *string
+				MatchConfidence    *float64
+				IsMatch            bool
+				LivenessPassed     bool
+				LivenessConfidence *float64
+				VerificationStatus string
+				CreatedAt          time.Time
+				RetryCount         int
+				DocumentType       string
+				DocumentID         *int
+			}
 
-	err := rows.Scan(
-			&v.VerificationID, &v.UserID, &v.Username, &v.Email,
-			&v.SelfieURL, &v.NationalIDPhotoURL,
-			&v.MatchConfidence, &v.IsMatch,
-			&v.LivenessPassed, &v.LivenessConfidence,
-		&v.VerificationStatus, &v.CreatedAt, &v.RetryCount,
-		&v.DocumentType, &v.DocumentID,
-	)
+			err := rows.Scan(
+				&v.VerificationID, &v.UserID, &v.Username, &v.Email,
+				&v.SelfieURL, &v.NationalIDPhotoURL,
+				&v.MatchConfidence, &v.IsMatch,
+				&v.LivenessPassed, &v.LivenessConfidence,
+				&v.VerificationStatus, &v.CreatedAt, &v.RetryCount,
+				&v.DocumentType, &v.DocumentID,
+			)
 
-	if err != nil {
+			if err != nil {
 				log.Printf("Error scanning face verification: %v", err)
 				continue
 			}
 
-		verifications = append(verifications, map[string]interface{}{
-			"verification_id":       v.VerificationID,
-			"user_id":               v.UserID,
-			"username":              v.Username,
-			"email":                 v.Email,
-			"selfie_url":            v.SelfieURL,
-			"national_id_photo_url": v.NationalIDPhotoURL,
-			"match_confidence":      v.MatchConfidence,
-			"is_match":              v.IsMatch,
-			"liveness_passed":       v.LivenessPassed,
-			"liveness_confidence":   v.LivenessConfidence,
-			"verification_status":   v.VerificationStatus,
-			"document_type":         v.DocumentType,
-			"document_id":           v.DocumentID,
+			verifications = append(verifications, map[string]interface{}{
+				"verification_id":       v.VerificationID,
+				"user_id":               v.UserID,
+				"username":              v.Username,
+				"email":                 v.Email,
+				"selfie_url":            v.SelfieURL,
+				"national_id_photo_url": v.NationalIDPhotoURL,
+				"match_confidence":      v.MatchConfidence,
+				"is_match":              v.IsMatch,
+				"liveness_passed":       v.LivenessPassed,
+				"liveness_confidence":   v.LivenessConfidence,
+				"verification_status":   v.VerificationStatus,
+				"document_type":         v.DocumentType,
+				"document_id":           v.DocumentID,
 				"created_at":            v.CreatedAt,
 				"retry_count":           v.RetryCount,
 			})
@@ -291,17 +291,16 @@ func adminReviewFaceVerificationHandler(dbPool *pgxpool.Pool, ctx context.Contex
 	}
 }
 
-// --- 5. Mock Face Matching API (สำหรับทดสอบ - ใช้จริงต้องเรียก AWS/Azure) ---
+// --- 5. Face Matching API (Manual Approval Mode) ---
+// Note: For production, integrate with AWS Rekognition or Azure Face API
+// Current implementation: Manual admin approval only
 func mockFaceMatchingAPI(selfieURL, idPhotoURL string) (matchConfidence float64, isMatch bool, livenessPassed bool, livenessConfidence float64) {
-	// TODO: Replace with real API call
-	// Example: AWS Rekognition CompareFaces
-	// https://docs.aws.amazon.com/rekognition/latest/dg/API_CompareFaces.html
-
-	// Mock response
-	matchConfidence = 85.5      // 85.5% match
-	isMatch = matchConfidence > 80.0
-	livenessPassed = true
-	livenessConfidence = 92.3
+	// Return neutral values for manual review
+	// Admin must manually approve/reject in the verification queue
+	matchConfidence = 0.0 // Requires manual verification
+	isMatch = false       // Default to false for safety
+	livenessPassed = true // Assume liveness passed if photos uploaded
+	livenessConfidence = 0.0
 
 	return
 }
@@ -327,7 +326,7 @@ func triggerFaceMatchingHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.H
 		// เรียก face matching API
 		matchConf, isMatch, livenessPass, livenessConf := mockFaceMatchingAPI(selfieURL, idPhotoURL)
 
-		// อัพเดทผลลัพธ์
+		// อัพเดทผลลัพธ์ - Manual review required
 		_, err = dbPool.Exec(ctx, `
 			UPDATE face_verifications
 			SET 
@@ -335,7 +334,7 @@ func triggerFaceMatchingHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.H
 				is_match = $2,
 				liveness_passed = $3,
 				liveness_confidence = $4,
-				api_provider = 'mock_api'
+				api_provider = 'manual_review'
 			WHERE verification_id = $5
 		`, matchConf, isMatch, livenessPass, livenessConf, verificationID)
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -15,8 +16,8 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// !!! เปลี่ยนเป็นชื่อ GCS Bucket จริงของคุณ !!!
-const GCS_BUCKET_NAME = "sex-worker-bucket"
+// GCS_BUCKET_NAME is now loaded from environment variable via gcs_helper.go
+// No need for hardcoded constant anymore
 
 func main() {
 	ctx := context.Background()
@@ -32,8 +33,12 @@ func main() {
 	fmt.Println("✅ Stripe client initialized.")
 
 	// --- 2. Connect to Databases ---
-	// (ใช้การตั้งค่าจาก docker-compose.yml)
-	dbPool, err := pgxpool.New(ctx, "postgres://admin:mysecretpassword@localhost:5432/skillmatch_db?sslmode=disable")
+	// Read DATABASE_URL from environment or use default for local dev
+	dbConnStr := os.Getenv("DATABASE_URL")
+	if dbConnStr == "" {
+		dbConnStr = "postgres://admin:mysecretpassword@localhost:5432/skillmatch_db?sslmode=disable"
+	}
+	dbPool, err := pgxpool.New(ctx, dbConnStr)
 	if err != nil {
 		log.Fatalf("ไม่สามารถเชื่อมต่อ PostgreSQL ได้: %v\n", err)
 	}
@@ -43,29 +48,52 @@ func main() {
 	}
 	fmt.Println("✅ เชื่อมต่อ PostgreSQL สำเร็จ!")
 
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", Password: "", DB: 0})
+	// Redis - skip in production if REDIS_URL not set
+	redisAddr := os.Getenv("REDIS_URL")
+	if redisAddr == "" {
+		// Build from REDIS_HOST and REDIS_PORT if REDIS_URL not set
+		redisHost := os.Getenv("REDIS_HOST")
+		redisPort := os.Getenv("REDIS_PORT")
+		if redisHost == "" {
+			redisHost = "localhost"
+		}
+		if redisPort == "" {
+			redisPort = "6379"
+		}
+		redisAddr = redisHost + ":" + redisPort
+	}
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr, Password: redisPassword, DB: 0})
 	if _, err = rdb.Ping(ctx).Result(); err != nil {
-		log.Fatalf("ไม่สามารถเชื่อมต่อ Redis ได้: %v\n", err)
+		log.Printf("⚠️  Redis connection failed (non-fatal): %v\n", err)
+		// Don't fatal - Redis is optional for now
 	}
 	fmt.Println("✅ เชื่อมต่อ Redis สำเร็จ!")
 
 	// --- 3. Connect to Google Cloud Storage (Optional for Development) ---
-	// (ต้องตั้งค่า ENV VAR: GOOGLE_APPLICATION_CREDENTIALS)
+	// (ต้องตั้งค่า ENV VAR: GOOGLE_APPLICATION_CREDENTIALS, GCS_BUCKET_NAME)
 	var storageClient *storage.Client
-	storageClient, err = storage.NewClient(ctx)
-	if err != nil {
-		log.Printf("⚠️  Failed to create Google Storage client: %v\n", err)
-		log.Println("⚠️  Running in DEVELOPMENT MODE without GCS (file uploads will fail)")
-		log.Println("⚠️  To enable GCS, set GOOGLE_APPLICATION_CREDENTIALS environment variable")
+	if err := initGCS(ctx); err != nil {
+		log.Printf("⚠️  GCS initialization failed: %v\n", err)
+		log.Println("⚠️  Running in DEVELOPMENT MODE without GCS (file uploads will be disabled)")
+		log.Println("⚠️  To enable GCS:")
+		log.Println("    1. Set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json")
+		log.Println("    2. Set GCS_BUCKET_NAME=your-bucket-name")
+		log.Println("    3. Set GCS_PROJECT_ID=your-project-id")
 		storageClient = nil // Set to nil to indicate GCS is unavailable
 	} else {
-		defer storageClient.Close()
+		storageClient = getGCSClient()
+		defer closeGCS()
 		fmt.Println("✅ เชื่อมต่อ Google Cloud Storage สำเร็จ!")
 	}
 
 	// --- 4. Initialize Global Database Connection ---
 	// (for message, notification, report handlers)
-	if err := InitDatabase("postgres://admin:mysecretpassword@localhost:5432/skillmatch_db?sslmode=disable"); err != nil {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://admin:mysecretpassword@localhost:5432/skillmatch_db?sslmode=disable"
+	}
+	if err := InitDatabase(dbURL); err != nil {
 		log.Fatalf("Failed to initialize database: %v\n", err)
 	}
 	defer db.Close()
@@ -116,14 +144,17 @@ func main() {
 	router.GET("/api/info", getServerInfoHandler())                     // Server information
 	router.GET("/api/stats/system", getSystemStatsHandler(dbPool, ctx)) // System statistics (public)
 
-	router.GET("/tiers", getTiersHandler(dbPool, ctx))                           // (from tier_handlers.go)	// Authentication & Registration Routes
-	router.POST("/auth/send-verification", sendVerificationHandler(dbPool, ctx)) // ส่ง OTP ไปทาง email (from email_verification.go)
-	router.POST("/auth/verify-email", verifyEmailHandler(dbPool, ctx))           // ยืนยัน OTP (from email_verification.go)
-	router.POST("/register", registerWithVerificationHandler(dbPool, ctx))       // สมัครสมาชิก (User - ต้องยืนยัน OTP ก่อน) (from email_verification.go)
-	router.POST("/register/provider", registerProviderHandler(dbPool, ctx))      // สมัครเป็น Provider (ต้องส่งเอกสาร) (from provider_system_handlers.go)
-	router.POST("/register/basic", createUserHandler(dbPool, ctx))               // สมัครแบบไม่ต้องยืนยัน email (เก่า - deprecated)
-	router.POST("/login", loginHandler(dbPool, ctx))                             // (from auth_handlers.go)
-	router.POST("/auth/google", handleGoogleCallback(dbPool, ctx))               // (from auth_handlers.go)
+	router.GET("/tiers", getTiersHandler(dbPool, ctx))                                  // (from tier_handlers.go)	// Authentication & Registration Routes
+	router.POST("/auth/send-verification", sendVerificationHandler(dbPool, ctx))        // ส่ง OTP ไปทาง email (from email_verification.go)
+	router.POST("/auth/verify-email", verifyEmailHandler(dbPool, ctx))                  // ยืนยัน OTP (from email_verification.go)
+	router.POST("/register", createUserHandler(dbPool, ctx))                            // สมัครสมาชิก (User - ไม่ต้องยืนยัน OTP เพราะ email service ยังไม่ได้ตั้งค่า) (from auth_handlers.go)
+	router.POST("/register/provider", registerProviderHandler(dbPool, ctx))             // สมัครเป็น Provider (ต้องส่งเอกสาร) (from provider_system_handlers.go)
+	router.POST("/register/verification", registerWithVerificationHandler(dbPool, ctx)) // สมัครแบบยืนยัน OTP (ใช้เมื่อตั้งค่า email service แล้ว) (from email_verification.go)
+	router.POST("/login", loginHandler(dbPool, ctx))                                    // (from auth_handlers.go)
+	router.POST("/auth/google", handleGoogleCallback(dbPool, ctx))                      // (from auth_handlers.go)
+	router.POST("/auth/google/login", handleGoogleCallback(dbPool, ctx))                // Alias for Google login
+	router.POST("/auth/google/callback", handleGoogleCallback(dbPool, ctx))             // Alias for Google callback
+	router.GET("/auth/google/callback", handleGoogleCallback(dbPool, ctx))              // GET for redirect
 
 	router.POST("/payment/webhook", paymentWebhookHandler(dbPool, ctx)) // (from payment_handlers.go)
 
@@ -134,6 +165,14 @@ func main() {
 	protected := router.Group("/")
 	protected.Use(authMiddleware()) // (from middleware.go)
 	{
+		// Password Management
+		protected.POST("/auth/set-password", setPasswordHandler(dbPool, ctx)) // ตั้ง/เปลี่ยน password (สำหรับ Google users หรือ reset password)
+
+		// Email Verification (for logged-in users)
+		protected.GET("/auth/verification-status", checkVerificationStatusHandler(dbPool, ctx)) // ตรวจสอบสถานะการยืนยัน email
+		protected.POST("/auth/send-otp", sendOTPHandler(dbPool, ctx))                           // ส่ง OTP ไปที่ email ของ user ที่ login แล้ว
+		protected.POST("/auth/verify-otp", verifyOTPHandler(dbPool, ctx))                       // ยืนยัน OTP สำหรับ user ที่ login แล้ว
+
 		// User Routes
 		protected.GET("/users/me", getMeHandler(dbPool, ctx))    // (from user_handlers.go)
 		protected.GET("/profile", getMeHandler(dbPool, ctx))     // Alias for /users/me (Frontend compatibility)
@@ -143,15 +182,16 @@ func main() {
 		protected.GET("/browse/users", browseUsersHandler(dbPool, ctx)) // (from browse_handlers.go)
 
 		// Verification (KYC) Routes
-		protected.POST("/verification/start", startVerificationHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx))                    // (from verification_handlers.go)
-		protected.POST("/verification/submit", submitVerificationHandler(dbPool, ctx))                                                  // (from verification_handlers.go)
-		protected.POST("/verification/provider-submit", providerSubmitVerificationHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx)) // (from verification_handlers.go)
+		protected.POST("/verification/start", startVerificationHandler(dbPool, storageClient, getGCSBucketName(), ctx))                    // (from verification_handlers.go)
+		protected.POST("/verification/submit", submitVerificationHandler(dbPool, ctx))                                                     // (from verification_handlers.go)
+		protected.POST("/verification/provider-submit", providerSubmitVerificationHandler(dbPool, storageClient, getGCSBucketName(), ctx)) // (from verification_handlers.go)
 
 		// Photo Gallery Routes
-		protected.GET("/photos/me", getMyPhotosHandler(dbPool, ctx))                                          // (from photo_handlers.go)
-		protected.POST("/photos/start", startPhotoUploadHandler(dbPool, storageClient, GCS_BUCKET_NAME, ctx)) // (from photo_handlers.go)
-		protected.POST("/photos/submit", submitPhotoUploadHandler(dbPool, ctx))                               // (from photo_handlers.go)
-		protected.DELETE("/photos/:photoId", deletePhotoHandler(dbPool, ctx))                                 // (from photo_handlers.go)
+		protected.GET("/photos/me", getMyPhotosHandler(dbPool, ctx))                                                      // (from photo_handlers.go)
+		protected.POST("/photos/upload-base64", uploadPhotoBase64Handler(dbPool, storageClient, getGCSBucketName(), ctx)) // (from photo_handlers.go)
+		protected.POST("/photos/start", startPhotoUploadHandler(dbPool, storageClient, getGCSBucketName(), ctx))          // (from photo_handlers.go)
+		protected.POST("/photos/submit", submitPhotoUploadHandler(dbPool, storageClient, getGCSBucketName(), ctx))        // (from photo_handlers.go)
+		protected.DELETE("/photos/:photoId", deletePhotoHandler(dbPool, ctx))                                             // (from photo_handlers.go)
 
 		// Subscription Routes
 		protected.POST("/subscription/create-checkout", createCheckoutSessionHandler(dbPool, ctx)) // (from payment_handlers.go)
@@ -166,14 +206,20 @@ func main() {
 		// 🆕 Booking Routes
 		protected.POST("/packages", createPackageHandler(dbPool, ctx))                                // สร้างแพ็คเกจ (provider)
 		protected.POST("/bookings", createBookingHandler(dbPool, ctx))                                // จองบริการ (ไม่มีการชำระเงิน)
-		protected.POST("/bookings/create-with-payment", createBookingWithPaymentHandler(dbPool, ctx)) // 🆕 จองบริการพร้อมชำระเงิน
+		protected.POST("/bookings/create-with-payment", createBookingWithPaymentHandler(dbPool, ctx)) // 🆕 จองบริการพร้อมชำระเงิน (Stripe)
+		protected.POST("/bookings/create-with-qr", createBookingWithQRHandler(dbPool, ctx))           // 🆕 จองบริการพร้อม QR Code PromptPay
 		protected.GET("/bookings/my", getMyBookingsHandler(dbPool, ctx))                              // ดูการจองของตัวเอง (client)
 		protected.GET("/bookings/provider", getProviderBookingsHandler(dbPool, ctx))                  // ดูการจองที่เข้ามา (provider)
 		protected.PATCH("/bookings/:id/status", updateBookingStatusHandler(dbPool, ctx))              // อัพเดทสถานะการจอง
 		protected.GET("/bookings/:id/work-details", getBookingWorkDetailsHandler(dbPool, ctx))        // 🆕 รายละเอียด booking สำหรับ provider ทำงาน
 		protected.GET("/bookings/:id/extension-packages", getExtensionPackagesHandler(dbPool, ctx))   // 🆕 ดูแพ็คเกจต่อเวลา
+		protected.GET("/bookings/:id/payment", getBookingPaymentHandler(dbPool, ctx))                 // 🆕 ดูข้อมูลการชำระเงิน
 		protected.POST("/bookings/extend", extendBookingHandler(dbPool, ctx))                         // 🆕 ต่อเวลา booking
 		protected.POST("/provider/location/update", updateProviderLocationHandler(dbPool, ctx))       // 🆕 อัพเดทพิกัด provider
+
+		// 🆕 Payment Routes (QR Code & PromptPay)
+		protected.POST("/payments/:payment_reference/confirm", confirmPaymentHandler(dbPool, ctx))   // ยืนยันการชำระเงิน
+		protected.GET("/payments/:payment_reference/status", checkPaymentStatusHandler(dbPool, ctx)) // ตรวจสอบสถานะการชำระเงิน
 
 		// 🆕 Review Routes
 		protected.POST("/reviews", createReviewHandler(dbPool, ctx)) // สร้างรีวิว
@@ -234,9 +280,13 @@ func main() {
 		protected.POST("/provider/face-verification", submitFaceVerificationHandler(dbPool, ctx)) // อัปโหลด selfie สำหรับ face matching
 		protected.GET("/provider/face-verification", getMyFaceVerificationHandler(dbPool, ctx))   // ดูสถานะ face verification
 
-		// 🆕 Provider Tier Management
-		protected.GET("/provider/my-tier", getMyProviderTierHandler(dbPool, ctx))     // ดู Tier ปัจจุบันของตัวเอง (from provider_tier_handlers.go)
-		protected.GET("/provider/tier-history", getMyTierHistoryHandler(dbPool, ctx)) // ดูประวัติการเปลี่ยน Tier (from provider_tier_handlers.go)
+		// 🆕 Provider Tier Management (with Admin Approval)
+		protected.GET("/provider/available-tiers", getAvailableTiersHandler(dbPool, ctx))                      // ดู Tiers ทั้งหมดที่สามารถอัพเกรดได้
+		protected.GET("/provider/my-tier", getMyProviderTierHandler(dbPool, ctx))                              // ดู Tier ปัจจุบันของตัวเอง
+		protected.GET("/provider/tier-history", getMyTierHistoryHandler(dbPool, ctx))                          // ดูประวัติการเปลี่ยน Tier
+		protected.POST("/provider/request-upgrade", requestProviderTierUpgradeHandler(dbPool, ctx))            // 🆕 ส่งคำขออัพเกรด Tier (รอแอดมินอนุมัติ)
+		protected.GET("/provider/my-upgrade-requests", getMyUpgradeRequestsHandler(dbPool, ctx))               // 🆕 ดูคำขออัพเกรดของตัวเอง
+		protected.POST("/provider/create-upgrade-checkout", createProviderUpgradeCheckoutHandler(dbPool, ctx)) // 🆕 สร้าง Stripe Checkout (หลังแอดมินอนุมัติ)
 
 		// 🆕 Provider Schedule Management (from schedule_handlers.go)
 		protected.POST("/provider/schedule", createScheduleHandler(dbPool, ctx))               // สร้างตารางงาน
@@ -281,16 +331,20 @@ func main() {
 		protected.POST("/photos/:id/verify", submitPhotoVerificationHandler(dbPool, ctx)) // ส่งรูปเพื่อขอ verified badge
 	}
 
-	// Admin Routes (ต้อง Login และเป็น Admin)
+	// Public Coupon/Promotion Routes (ไม่ต้อง login)
+	router.GET("/coupons/browse", browseCouponsHandler(dbPool, ctx))                          // ดูคูปองทั้งหมดที่ active (Public)
+	router.GET("/coupons/provider/:providerId", getProviderPublicCouponsHandler(dbPool, ctx)) // ดูคูปองของ provider นั้นๆ (Public)
+
+	// Admin Routes (ต้อง Login และเป็น Admin หรือ GOD)
 	admin := router.Group("/admin")
 	admin.Use(authMiddleware())
-	admin.Use(adminAuthMiddleware(dbPool, ctx)) // (from admin_middleware.go)
+	admin.Use(adminOrGodAuthMiddleware(dbPool, ctx)) // ⬅️ ใช้ adminOrGodAuthMiddleware แทน
 	{
 		admin.GET("/pending-users", getPendingUsersHandler(dbPool, ctx))
 		admin.GET("/kyc-details/:userId", getKycDetailsHandler(dbPool, ctx))
 		admin.POST("/approve/:userId", approveUserHandler(dbPool, ctx))
 		admin.POST("/reject/:userId", rejectUserHandler(dbPool, ctx))
-		admin.GET("/kyc-file-url", getKycFileUrlHandler(storageClient, GCS_BUCKET_NAME, ctx))
+		admin.GET("/kyc-file-url", getKycFileUrlHandler(storageClient, getGCSBucketName(), ctx))
 		admin.POST("/users", adminCreateUserHandler(dbPool, ctx))
 
 		// 🆕 Admin Report Management
@@ -298,8 +352,7 @@ func main() {
 		admin.PATCH("/reports/:id", UpdateReportStatus) // อัพเดทสถานะรายงาน
 		admin.DELETE("/reports/:id", DeleteReport)      // ลบรายงาน
 
-		// 🆕 GOD Dashboard & User Management
-		admin.GET("/stats/god", getGodStatsHandler(dbPool, ctx))          // GOD statistics
+		// 🆕 Admin User Management (GOD also allowed)
 		admin.GET("/users", listAllUsersHandler(dbPool, ctx))             // List all users
 		admin.GET("/admins", listAdminsHandler(dbPool, ctx))              // List all admins (GOD only)
 		admin.POST("/admins", createAdminHandler(dbPool, ctx))            // Create admin (GOD only)
@@ -324,10 +377,13 @@ func main() {
 		admin.GET("/provider-stats", getAdminProviderStatsHandler(dbPool, ctx))                  // สถิติ providers (from provider_system_handlers.go)
 		admin.GET("/providers/:providerId/queue-info", getProviderQueueInfoHandler(dbPool, ctx)) // 🆕 ดูข้อมูล Queue และ Location ของ Provider
 
-		// 🆕 Admin Provider Tier Management
-		admin.POST("/recalculate-provider-tiers", adminRecalculateProviderTiersHandler(dbPool, ctx)) // คำนวณ Tier อัตโนมัติทั้งหมด (from provider_tier_handlers.go)
-		admin.PATCH("/set-provider-tier/:userId", adminSetProviderTierHandler(dbPool, ctx))          // เปลี่ยน Tier แบบ Manual (from provider_tier_handlers.go)
-		admin.GET("/provider/:userId/tier-details", adminGetProviderTierDetailsHandler(dbPool, ctx)) // ดูรายละเอียด Tier (from provider_tier_handlers.go)
+		// 🆕 Admin Provider Tier Management (with Approval System)
+		admin.GET("/upgrade-requests", adminGetUpgradeRequestsHandler(dbPool, ctx))                        // ดูคำขออัพเกรดทั้งหมด
+		admin.POST("/upgrade-requests/:requestId/approve", adminApproveUpgradeRequestHandler(dbPool, ctx)) // อนุมัติคำขออัพเกรด
+		admin.POST("/upgrade-requests/:requestId/reject", adminRejectUpgradeRequestHandler(dbPool, ctx))   // ปฏิเสธคำขออัพเกรด
+		admin.POST("/recalculate-provider-tiers", adminRecalculateProviderTiersHandler(dbPool, ctx))       // คำนวณ Tier อัตโนมัติทั้งหมด
+		admin.PATCH("/set-provider-tier/:userId", adminSetProviderTierHandler(dbPool, ctx))                // เปลี่ยน Tier แบบ Manual
+		admin.GET("/provider/:userId/tier-details", adminGetProviderTierDetailsHandler(dbPool, ctx))       // ดูรายละเอียด Tier
 
 		// 🆕 Admin Face Verification Management (from face_verification_handlers.go)
 		admin.GET("/face-verifications", adminListFaceVerificationsHandler(dbPool, ctx))                           // ดู face verifications ทั้งหมด
@@ -351,14 +407,25 @@ func main() {
 	// GOD Routes (ต้อง Login และเป็น GOD tier 5)
 	god := router.Group("/god")
 	god.Use(authMiddleware())
+	god.Use(godAuthMiddleware(dbPool, ctx)) // ⬅️ เพิ่ม GOD middleware
 	{
+		// GOD Statistics Dashboard
+		god.GET("/stats", getGodStatsHandler(dbPool, ctx))              // Stats (legacy)
+		god.GET("/stats/view", godGetStatsFromViewHandler(dbPool, ctx)) // Stats from view_god
+
 		// View Mode Switching (UI simulation - doesn't modify DB)
 		god.POST("/view-mode", setGodViewModeHandler(dbPool, ctx)) // Set GOD view mode (user/provider/admin)
 		god.GET("/view-mode", getGodViewModeHandler(dbPool, ctx))  // Get current view mode
 
 		// User Management (modifies actual user data in DB)
-		god.POST("/update-user", updateUserHandler(dbPool, ctx))      // Update any user's role/tier
-		god.DELETE("/users/:user_id", deleteUserHandler(dbPool, ctx)) // Delete any user (except GOD)
+		god.POST("/update-user", updateUserHandler(dbPool, ctx))                 // Update any user's role/tier
+		god.DELETE("/users/:user_id", deleteUserHandler(dbPool, ctx))            // Delete any user (except GOD)
+		god.POST("/approve-admin/:user_id", godApproveAdminHandler(dbPool, ctx)) // GOD อนุมัติ admin (legacy)
+
+		// 🆕 Database Function Handlers
+		god.POST("/promote-admin/:user_id", godPromoteToAdminHandler(dbPool, ctx))       // Promote to admin using DB function
+		god.POST("/promote-provider/:user_id", godPromoteToProviderHandler(dbPool, ctx)) // Promote to provider using DB function
+		god.POST("/demote/:user_id", godDemoteUserHandler(dbPool, ctx))                  // Demote user using DB function
 	}
 
 	// 🆕 Service Category Public Routes

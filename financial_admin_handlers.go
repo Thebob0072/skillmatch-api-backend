@@ -526,14 +526,13 @@ func adminGetUserWalletHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Ha
 		var wallet Wallet
 		err = dbPool.QueryRow(ctx, `
 			SELECT wallet_id, user_id, available_balance, pending_balance,
-			       total_earned, total_withdrawn, total_commission_paid,
-			       last_updated, created_at
+			       total_earned, total_withdrawn, updated_at
 			FROM wallets
 			WHERE user_id = $1
 		`, userID).Scan(
 			&wallet.WalletID, &wallet.UserID, &wallet.AvailableBalance,
 			&wallet.PendingBalance, &wallet.TotalEarned, &wallet.TotalWithdrawn,
-			&wallet.TotalCommissionPaid, &wallet.LastUpdated, &wallet.CreatedAt,
+			&wallet.LastUpdated,
 		)
 
 		if err != nil {

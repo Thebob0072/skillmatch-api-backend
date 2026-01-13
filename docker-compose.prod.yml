@@ -19,7 +19,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.production
     container_name: skillmatch_api
     environment:
       - GIN_MODE=release

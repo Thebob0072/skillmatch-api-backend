@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -121,6 +122,7 @@ func listAllUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 		isAdmin := c.Query("is_admin")
 		verificationStatus := c.Query("verification_status")
 		searchQuery := c.Query("search") // username or email
+		role := c.Query("role")          // NEW: Filter by role (client/provider)
 
 		// Build query
 		sqlStatement := `
@@ -130,7 +132,8 @@ func listAllUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				u.verification_status, u.tier_id, u.provider_level_id, 
 				u.phone_number, u.is_admin,
 				u.google_profile_picture, p.profile_image_url, p.age,
-				t.name as tier_name
+				t.name as tier_name,
+				u.user_type, u.is_provider
 			FROM users u
 			LEFT JOIN user_profiles p ON u.user_id = p.user_id
 			LEFT JOIN tiers t ON u.tier_id = t.tier_id
@@ -149,6 +152,15 @@ func listAllUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 			sqlStatement += " AND u.verification_status = $" + strconv.Itoa(argCount)
 			args = append(args, verificationStatus)
 			argCount++
+		}
+
+		// NEW: Filter by role
+		if role != "" {
+			if role == "provider" {
+				sqlStatement += " AND u.is_provider = true"
+			} else if role == "client" {
+				sqlStatement += " AND u.is_provider = false"
+			}
 		}
 
 		if searchQuery != "" {
@@ -177,12 +189,15 @@ func listAllUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 			var u User
 			var tierName *string
 
+			var userType *string
+			var isProvider *bool
+
 			if err := rows.Scan(
 				&u.UserID, &u.Username, &u.Email, &u.GenderID, &u.RegistrationDate,
 				&u.FirstName, &u.LastName, &u.VerificationStatus, &u.TierID,
 				&u.ProviderLevelID, &u.PhoneNumber, &u.IsAdmin,
 				&u.GoogleProfilePicture, &u.ProfileImageUrl, &u.Age,
-				&tierName,
+				&tierName, &userType, &isProvider,
 			); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"error":   "Failed to scan user row",
@@ -208,6 +223,8 @@ func listAllUsersHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				"profile_image_url":      u.ProfileImageUrl,
 				"age":                    u.Age,
 				"tier_name":              tierName,
+				"user_type":              userType,
+				"is_provider":            isProvider,
 			}
 			users = append(users, userMap)
 		}
@@ -498,10 +515,10 @@ func deleteUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFun
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"message":  "User deleted successfully",
-			"user_id":  userID,
-			"username": username,
-			"email":    email,
+			"message":   "User deleted successfully",
+			"user_id":   userID,
+			"username":  username,
+			"email":     email,
 			"was_admin": isAdmin,
 		})
 	}
@@ -725,5 +742,260 @@ func getGodViewModeHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handle
 			},
 			"available_modes": []string{"user", "provider", "admin", "god"},
 		})
+	}
+}
+
+// --- GOD Approve Admin Request ---
+// POST /god/approve-admin/:user_id
+// GOD can directly approve a user to become admin without request
+func godApproveAdminHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Verify requester is GOD (tier_id = 5)
+		requesterID := c.GetInt("user_id")
+		var requesterTierID int
+		var requesterIsAdmin bool
+
+		err := dbPool.QueryRow(ctx,
+			"SELECT tier_id, is_admin FROM users WHERE user_id = $1",
+			requesterID,
+		).Scan(&requesterTierID, &requesterIsAdmin)
+
+		if err != nil || !requesterIsAdmin || requesterTierID != 5 {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Only GOD (tier 5) can approve admins directly",
+			})
+			return
+		}
+
+		// Get target user ID from URL
+		targetUserID := c.Param("user_id")
+
+		var req struct {
+			AdminNote string `json:"admin_note"` // Optional note from GOD
+		}
+		c.ShouldBindJSON(&req)
+
+		// Check if target user exists
+		var targetUsername, targetEmail string
+		var targetIsAdmin bool
+
+		err = dbPool.QueryRow(ctx,
+			"SELECT username, email, is_admin FROM users WHERE user_id = $1",
+			targetUserID,
+		).Scan(&targetUsername, &targetEmail, &targetIsAdmin)
+
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+
+		if targetIsAdmin {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "User is already an admin",
+				"user": gin.H{
+					"user_id":  targetUserID,
+					"username": targetUsername,
+					"email":    targetEmail,
+				},
+			})
+			return
+		}
+
+		// Promote user to admin (tier_id = 4 for admin)
+		tx, err := dbPool.Begin(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction failed"})
+			return
+		}
+		defer tx.Rollback(ctx)
+
+		// Update user to admin
+		_, err = tx.Exec(ctx, `
+			UPDATE users
+			SET is_admin = true,
+			    tier_id = 4,
+			    updated_at = NOW()
+			WHERE user_id = $1
+		`, targetUserID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to promote user"})
+			return
+		}
+
+		// Log the action in admin_actions table (if exists)
+		_, err = tx.Exec(ctx, `
+			INSERT INTO admin_actions (
+				admin_id, action_type, target_user_id,
+				description, created_at
+			) VALUES ($1, 'promote_to_admin', $2, $3, NOW())
+		`, requesterID, targetUserID,
+			fmt.Sprintf("GOD approved %s (%s) as admin. Note: %s", targetUsername, targetEmail, req.AdminNote))
+
+		if err := tx.Commit(ctx); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit changes"})
+			return
+		}
+
+		// Send notification to new admin
+		targetUserIDInt, _ := strconv.Atoi(targetUserID)
+		sendNotification(dbPool, ctx, targetUserIDInt, "admin_approved",
+			"🎉 Congratulations! You have been promoted to Admin by GOD.")
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "User successfully promoted to Admin",
+			"user": gin.H{
+				"user_id":  targetUserID,
+				"username": targetUsername,
+				"email":    targetEmail,
+				"is_admin": true,
+				"tier_id":  4,
+			},
+			"approved_by": requesterID,
+			"note":        req.AdminNote,
+		})
+	}
+}
+
+// --- GOD: Promote to Admin using Database Function ---
+func godPromoteToAdminHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		godID, _ := c.Get("userID")
+		targetUserID, err := strconv.Atoi(c.Param("user_id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		// Call database function
+		var success bool
+		err = dbPool.QueryRow(ctx,
+			"SELECT promote_to_admin($1, $2)",
+			targetUserID, godID,
+		).Scan(&success)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !success {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to promote user. User may not exist or is already GOD."})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "User promoted to Admin successfully",
+			"user_id": targetUserID,
+		})
+	}
+}
+
+// --- GOD: Demote User using Database Function ---
+func godDemoteUserHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		godID, _ := c.Get("userID")
+		targetUserID, err := strconv.Atoi(c.Param("user_id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		// Call database function
+		var success bool
+		err = dbPool.QueryRow(ctx,
+			"SELECT demote_user($1, $2)",
+			targetUserID, godID,
+		).Scan(&success)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !success {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to demote user"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "User demoted to client successfully",
+			"user_id": targetUserID,
+		})
+	}
+}
+
+// --- GOD: Promote to Provider using Database Function ---
+func godPromoteToProviderHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		targetUserID, err := strconv.Atoi(c.Param("user_id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+			return
+		}
+
+		// Call database function
+		var success bool
+		err = dbPool.QueryRow(ctx,
+			"SELECT promote_to_provider($1)",
+			targetUserID,
+		).Scan(&success)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !success {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to promote to provider. User may not be a client."})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "User promoted to Provider successfully. Verification status set to pending.",
+			"user_id": targetUserID,
+		})
+	}
+}
+
+// --- GOD: Get Statistics from View ---
+func godGetStatsFromViewHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var stats struct {
+			UserID           int       `json:"user_id"`
+			Username         string    `json:"username"`
+			Email            string    `json:"email"`
+			TierID           int       `json:"tier_id"`
+			TierName         string    `json:"tier_name"`
+			IsAdmin          bool      `json:"is_admin"`
+			RegistrationDate time.Time `json:"registration_date"`
+			TotalClients     int       `json:"total_clients"`
+			TotalProviders   int       `json:"total_providers"`
+			TotalAdmins      int       `json:"total_admins"`
+			TotalBookings    int       `json:"total_bookings"`
+			TotalRevenue     float64   `json:"total_revenue"`
+		}
+
+		err := dbPool.QueryRow(ctx, "SELECT * FROM view_god LIMIT 1").Scan(
+			&stats.UserID,
+			&stats.Username,
+			&stats.Email,
+			&stats.TierID,
+			&stats.TierName,
+			&stats.IsAdmin,
+			&stats.RegistrationDate,
+			&stats.TotalClients,
+			&stats.TotalProviders,
+			&stats.TotalAdmins,
+			&stats.TotalBookings,
+			&stats.TotalRevenue,
+		)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get GOD stats", "details": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, stats)
 	}
 }

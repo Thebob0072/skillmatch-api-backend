@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -32,7 +32,7 @@ func addBankAccountHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handle
 		err := dbPool.QueryRow(ctx, `
 			SELECT EXISTS(
 				SELECT 1 FROM bank_accounts 
-				WHERE user_id = $1 AND account_number = $2 AND is_active = true
+				WHERE user_id = $1 AND account_number = $2
 			)
 		`, userID, req.AccountNumber).Scan(&exists)
 
@@ -48,16 +48,14 @@ func addBankAccountHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Handle
 			`, userID)
 		}
 
-		// Insert bank account
+		// Insert bank account (using actual table columns)
 		var bankAccountID int
 		err = dbPool.QueryRow(ctx, `
 			INSERT INTO bank_accounts (
-				user_id, bank_name, bank_code, account_number, account_name,
-				account_type, branch_name, is_default, is_active
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true)
+				user_id, bank_name, account_number, account_holder_name, is_default
+			) VALUES ($1, $2, $3, $4, $5)
 			RETURNING bank_account_id
-		`, userID, req.BankName, req.BankCode, req.AccountNumber, req.AccountName,
-			req.AccountType, req.BranchName, req.IsDefault).Scan(&bankAccountID)
+		`, userID, req.BankName, req.AccountNumber, req.AccountName, req.IsDefault).Scan(&bankAccountID)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add bank account"})
@@ -83,11 +81,10 @@ func getMyBankAccountsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		userID, _ := c.Get("userID")
 
 		rows, err := dbPool.Query(ctx, `
-			SELECT bank_account_id, bank_name, bank_code, account_number, account_name,
-			       account_type, branch_name, is_verified, verified_at, is_default, is_active,
-			       created_at, updated_at
+			SELECT bank_account_id, bank_name, account_number, account_holder_name,
+			       is_default, created_at
 			FROM bank_accounts
-			WHERE user_id = $1 AND is_active = true
+			WHERE user_id = $1
 			ORDER BY is_default DESC, created_at DESC
 		`, userID)
 
@@ -101,14 +98,16 @@ func getMyBankAccountsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		for rows.Next() {
 			var acc BankAccount
 			err := rows.Scan(
-				&acc.BankAccountID, &acc.BankName, &acc.BankCode, &acc.AccountNumber,
-				&acc.AccountName, &acc.AccountType, &acc.BranchName, &acc.IsVerified,
-				&acc.VerifiedAt, &acc.IsDefault, &acc.IsActive, &acc.CreatedAt, &acc.UpdatedAt,
+				&acc.BankAccountID, &acc.BankName, &acc.AccountNumber,
+				&acc.AccountName, &acc.IsDefault, &acc.CreatedAt,
 			)
 			if err != nil {
 				continue
 			}
 			acc.UserID = userID.(int)
+			// Set default values for fields not in database
+			acc.IsVerified = false // Default to false until admin verifies
+			acc.IsActive = true
 			accounts = append(accounts, acc)
 		}
 
@@ -126,7 +125,7 @@ func deleteBankAccountHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		bankAccountID := c.Param("bank_account_id")
 
 		result, err := dbPool.Exec(ctx, `
-			UPDATE bank_accounts SET is_active = false
+			DELETE FROM bank_accounts
 			WHERE bank_account_id = $1 AND user_id = $2
 		`, bankAccountID, userID)
 
@@ -159,15 +158,15 @@ func getMyWalletHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 			INSERT INTO wallets (user_id) VALUES ($1)
 			ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
 			RETURNING wallet_id, user_id, available_balance, pending_balance,
-			          total_earned, total_withdrawn, total_commission_paid,
-			          last_updated, created_at
+			          total_earned, total_withdrawn, updated_at
 		`, userID).Scan(
 			&wallet.WalletID, &wallet.UserID, &wallet.AvailableBalance,
 			&wallet.PendingBalance, &wallet.TotalEarned, &wallet.TotalWithdrawn,
-			&wallet.TotalCommissionPaid, &wallet.LastUpdated, &wallet.CreatedAt,
+			&wallet.LastUpdated,
 		)
 
 		if err != nil {
+			log.Printf("❌ Failed to fetch/create wallet for user %v: %v", userID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch wallet"})
 			return
 		}
@@ -193,9 +192,34 @@ func getMyWalletHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerFu
 			}
 		}
 
+		// Get booking statistics
+		var stats struct {
+			TotalBookings     int     `json:"total_bookings"`
+			CompletedBookings int     `json:"completed_bookings"`
+			PendingAmount     float64 `json:"pending_amount"`
+			AvailableAmount   float64 `json:"available_amount"`
+		}
+
+		dbPool.QueryRow(ctx, `
+			SELECT 
+				COUNT(DISTINCT b.booking_id) FILTER (WHERE b.provider_id = $1),
+				COUNT(DISTINCT b.booking_id) FILTER (WHERE b.provider_id = $1 AND b.status = 'completed'),
+				COALESCE((SELECT pending_balance FROM wallets WHERE user_id = $1), 0),
+				COALESCE((SELECT available_balance FROM wallets WHERE user_id = $1), 0)
+			FROM bookings b
+		`, userID).Scan(&stats.TotalBookings, &stats.CompletedBookings, &stats.PendingAmount, &stats.AvailableAmount)
+
+		if err != nil {
+			log.Printf("❌ Failed to fetch booking stats for user %v: %v", userID, err)
+		}
+
 		c.JSON(http.StatusOK, gin.H{
-			"wallet":              wallet,
-			"recent_transactions": transactions,
+			"success": true,
+			"data": gin.H{
+				"wallet":              wallet,
+				"recent_transactions": transactions,
+				"stats":               stats,
+			},
 		})
 	}
 }
@@ -241,20 +265,14 @@ func requestWithdrawalHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 			return
 		}
 
-		// Verify bank account
-		var isVerified bool
+		// Verify bank account exists
+		var exists bool
 		err = dbPool.QueryRow(ctx, `
-			SELECT is_verified FROM bank_accounts
-			WHERE bank_account_id = $1 AND user_id = $2 AND is_active = true
-		`, req.BankAccountID, userID).Scan(&isVerified)
+			SELECT EXISTS(SELECT 1 FROM bank_accounts WHERE bank_account_id = $1 AND user_id = $2)
+		`, req.BankAccountID, userID).Scan(&exists)
 
-		if err != nil {
+		if err != nil || !exists {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid bank account"})
-			return
-		}
-
-		if !isVerified {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Bank account not verified yet"})
 			return
 		}
 
@@ -270,15 +288,25 @@ func requestWithdrawalHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		}
 		defer tx.Rollback(ctx)
 
+		// Get wallet_id
+		var walletID int
+		err = tx.QueryRow(ctx, `
+			SELECT wallet_id FROM wallets WHERE user_id = $1
+		`, userID).Scan(&walletID)
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Wallet not found"})
+			return
+		}
+
 		// Create withdrawal request
 		var withdrawalID int
-		var withdrawalUUID string
 		err = tx.QueryRow(ctx, `
-			INSERT INTO withdrawals (
-				user_id, bank_account_id, requested_amount, fee, net_amount, status
-			) VALUES ($1, $2, $3, $4, $5, 'pending')
-			RETURNING withdrawal_id, withdrawal_uuid
-		`, userID, req.BankAccountID, req.RequestedAmount, withdrawalFee, netAmount).Scan(&withdrawalID, &withdrawalUUID)
+			INSERT INTO withdrawal_requests (
+				wallet_id, bank_account_id, amount, status
+			) VALUES ($1, $2, $3, 'pending')
+			RETURNING withdrawal_id
+		`, walletID, req.BankAccountID, req.RequestedAmount).Scan(&withdrawalID)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create withdrawal"})
@@ -288,8 +316,7 @@ func requestWithdrawalHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		// Deduct from available balance
 		_, err = tx.Exec(ctx, `
 			UPDATE wallets
-			SET available_balance = available_balance - $1,
-			    last_updated = CURRENT_TIMESTAMP
+			SET available_balance = available_balance - $1
 			WHERE user_id = $2
 		`, req.RequestedAmount, userID)
 
@@ -301,11 +328,9 @@ func requestWithdrawalHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		// Create transaction record
 		_, err = tx.Exec(ctx, `
 			INSERT INTO transactions (
-				user_id, type, status, amount, commission_amount, net_amount,
-				withdrawal_id, description
-			) VALUES ($1, 'withdrawal', 'pending', $2, $3, $4, $5, $6)
-		`, userID, req.RequestedAmount, withdrawalFee, netAmount, withdrawalID,
-			fmt.Sprintf("Withdrawal request #%d", withdrawalID))
+				wallet_id, type, status, amount, platform_fee, net_amount, booking_id
+			) VALUES ($1, 'withdrawal', 'pending', $2, $3, $4, NULL)
+		`, walletID, req.RequestedAmount, withdrawalFee, netAmount)
 
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create transaction"})
@@ -321,7 +346,6 @@ func requestWithdrawalHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		c.JSON(http.StatusCreated, gin.H{
 			"message":          "Withdrawal request created successfully",
 			"withdrawal_id":    withdrawalID,
-			"withdrawal_uuid":  withdrawalUUID,
 			"requested_amount": req.RequestedAmount,
 			"fee":              withdrawalFee,
 			"net_amount":       netAmount,
@@ -336,14 +360,14 @@ func getMyWithdrawalsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Hand
 		userID, _ := c.Get("userID")
 
 		rows, err := dbPool.Query(ctx, `
-			SELECT w.withdrawal_id, w.withdrawal_uuid, w.requested_amount, w.fee, w.net_amount,
-			       w.status, w.requested_at, w.approved_at, w.processed_at, w.completed_at,
-			       w.rejection_reason, w.transfer_reference,
-			       ba.bank_name, ba.account_number, ba.account_name
-			FROM withdrawals w
-			JOIN bank_accounts ba ON w.bank_account_id = ba.bank_account_id
+			SELECT wr.withdrawal_id, wr.amount, wr.status, wr.requested_at,
+			       wr.approved_at, wr.rejected_at, wr.completed_at, wr.admin_notes,
+			       ba.bank_name, ba.account_number, ba.account_holder_name
+			FROM withdrawal_requests wr
+			JOIN wallets w ON wr.wallet_id = w.wallet_id
+			JOIN bank_accounts ba ON wr.bank_account_id = ba.bank_account_id
 			WHERE w.user_id = $1
-			ORDER BY w.requested_at DESC
+			ORDER BY wr.requested_at DESC
 		`, userID)
 
 		if err != nil {
@@ -355,43 +379,50 @@ func getMyWithdrawalsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Hand
 		withdrawals := make([]map[string]interface{}, 0)
 		for rows.Next() {
 			var (
-				id, uuid                             string
-				requested, fee, net                  float64
-				status                               string
-				requestedAt                          time.Time
-				approvedAt, processedAt, completedAt sql.NullTime
-				rejectionReason, transferRef         sql.NullString
-				bankName, accountNumber, accountName string
+				id                int
+				amount            float64
+				status            string
+				requestedAt       time.Time
+				approvedAt        sql.NullTime
+				rejectedAt        sql.NullTime
+				completedAt       sql.NullTime
+				adminNotes        sql.NullString
+				bankName          string
+				accountNumber     string
+				accountHolderName string
 			)
 
-			rows.Scan(&id, &uuid, &requested, &fee, &net, &status, &requestedAt,
-				&approvedAt, &processedAt, &completedAt, &rejectionReason, &transferRef,
-				&bankName, &accountNumber, &accountName)
+			rows.Scan(&id, &amount, &status, &requestedAt,
+				&approvedAt, &rejectedAt, &completedAt, &adminNotes,
+				&bankName, &accountNumber, &accountHolderName)
+
+			// Calculate fee (10 THB fixed fee)
+			fee := 10.0
+			netAmount := amount - fee
 
 			withdrawal := map[string]interface{}{
 				"withdrawal_id":    id,
-				"withdrawal_uuid":  uuid,
-				"requested_amount": requested,
+				"requested_amount": amount,
 				"fee":              fee,
-				"net_amount":       net,
+				"net_amount":       netAmount,
 				"status":           status,
 				"requested_at":     requestedAt,
 				"bank_name":        bankName,
 				"account_number":   accountNumber,
-				"account_name":     accountName,
+				"account_name":     accountHolderName,
 			}
 
 			if approvedAt.Valid {
 				withdrawal["approved_at"] = approvedAt.Time
 			}
+			if rejectedAt.Valid {
+				withdrawal["rejected_at"] = rejectedAt.Time
+			}
 			if completedAt.Valid {
 				withdrawal["completed_at"] = completedAt.Time
 			}
-			if rejectionReason.Valid {
-				withdrawal["rejection_reason"] = rejectionReason.String
-			}
-			if transferRef.Valid {
-				withdrawal["transfer_reference"] = transferRef.String
+			if adminNotes.Valid {
+				withdrawal["admin_notes"] = adminNotes.String
 			}
 
 			withdrawals = append(withdrawals, withdrawal)
@@ -426,21 +457,21 @@ func getMyTransactionsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		offset := (page - 1) * limit
 
 		query := `
-			SELECT transaction_id, transaction_uuid, type, status, amount,
-			       commission_amount, net_amount, description, payment_method,
-			       booking_id, created_at
-			FROM transactions
-			WHERE user_id = $1
+			SELECT t.transaction_id, t.type, t.status, t.amount,
+			       t.platform_fee, t.net_amount, t.booking_id, t.created_at
+			FROM transactions t
+			INNER JOIN wallets w ON t.wallet_id = w.wallet_id
+			WHERE w.user_id = $1
 		`
 		args := []interface{}{userID}
 
 		if txType != "" {
-			query += " AND type = $2"
+			query += " AND t.type = $2"
 			args = append(args, txType)
-			query += " ORDER BY created_at DESC LIMIT $3 OFFSET $4"
+			query += " ORDER BY t.created_at DESC LIMIT $3 OFFSET $4"
 			args = append(args, limit, offset)
 		} else {
-			query += " ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+			query += " ORDER BY t.created_at DESC LIMIT $2 OFFSET $3"
 			args = append(args, limit, offset)
 		}
 
@@ -454,9 +485,9 @@ func getMyTransactionsHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.Han
 		transactions := make([]Transaction, 0)
 		for rows.Next() {
 			var tx Transaction
-			rows.Scan(&tx.TransactionID, &tx.TransactionUUID, &tx.Type, &tx.Status,
-				&tx.Amount, &tx.CommissionAmount, &tx.NetAmount, &tx.Description,
-				&tx.PaymentMethod, &tx.BookingID, &tx.CreatedAt)
+			rows.Scan(&tx.TransactionID, &tx.Type, &tx.Status,
+				&tx.Amount, &tx.CommissionAmount, &tx.NetAmount,
+				&tx.BookingID, &tx.CreatedAt)
 			transactions = append(transactions, tx)
 		}
 

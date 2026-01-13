@@ -52,7 +52,12 @@ func browseSearchHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				COALESCE(p.service_type, 'Both') as service_type,
 				p.location,
 				p.profile_image_url,
-				MIN(sp.price) as min_price
+				MIN(sp.price) as min_price,
+				p.languages,
+				p.working_hours,
+				p.age,
+				p.height,
+				p.weight
 			FROM users u
 			LEFT JOIN tiers pl ON u.provider_level_id = pl.tier_id
 			LEFT JOIN user_profiles p ON u.user_id = p.user_id
@@ -124,7 +129,8 @@ func browseSearchHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 			GROUP BY 
 				u.user_id, u.username, u.profile_picture_url, p.bio,
 				u.provider_level_id, pl.name, p.service_type, 
-				p.location, p.profile_image_url
+				p.location, p.profile_image_url, p.languages, 
+				p.working_hours, p.age, p.height, p.weight
 		`
 
 		// Apply sorting
@@ -167,6 +173,11 @@ func browseSearchHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				loc               *string
 				profileImageURL   *string
 				minPrice          *float64
+				languages         []string
+				workingHours      *string
+				age               *int
+				height            *int
+				weight            *int
 			)
 
 			err := rows.Scan(
@@ -174,6 +185,7 @@ func browseSearchHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				&providerLevelID, &providerLevelName,
 				&ratingAvg, &reviewCount, &svcType,
 				&loc, &profileImageURL, &minPrice,
+				&languages, &workingHours, &age, &height, &weight,
 			)
 
 			if err != nil {
@@ -198,6 +210,11 @@ func browseSearchHandler(dbPool *pgxpool.Pool, ctx context.Context) gin.HandlerF
 				"service_type":        svcType,
 				"location":            loc,
 				"min_price":           minPrice,
+				"languages":           languages,
+				"working_hours":       workingHours,
+				"age":                 age,
+				"height":              height,
+				"weight":              weight,
 			})
 		}
 
